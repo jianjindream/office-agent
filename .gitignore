@@ -1,0 +1,13 @@
+# Build output
+target/
+
+# IDE and operating-system metadata
+.idea/
+*.iml
+.DS_Store
+
+# Local secrets and overrides
+.env
+.env.*
+!/.env.example
+src/main/resources/application-local.yml
