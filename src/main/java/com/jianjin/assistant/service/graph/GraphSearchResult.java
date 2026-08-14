@@ -7,7 +7,7 @@ import java.util.List;
 
 public class GraphSearchResult {
     @JsonProperty("chunk_id")
-    private int chunkId;
+    private long chunkId;
     private double score;
     private List<String> entities = new ArrayList<>();
     @JsonProperty("hop_path")
@@ -15,15 +15,15 @@ public class GraphSearchResult {
 
     public GraphSearchResult() {}
 
-    public GraphSearchResult(int chunkId, double score, List<String> entities, List<String> hopPath) {
+    public GraphSearchResult(long chunkId, double score, List<String> entities, List<String> hopPath) {
         this.chunkId = chunkId;
         this.score = score;
         this.entities = entities != null ? entities : new ArrayList<>();
         this.hopPath = hopPath != null ? hopPath : new ArrayList<>();
     }
 
-    public int getChunkId() { return chunkId; }
-    public void setChunkId(int chunkId) { this.chunkId = chunkId; }
+    public long getChunkId() { return chunkId; }
+    public void setChunkId(long chunkId) { this.chunkId = chunkId; }
     public double getScore() { return score; }
     public void setScore(double score) { this.score = score; }
     public List<String> getEntities() { return entities; }

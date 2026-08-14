@@ -123,6 +123,10 @@ public class AppConfig {
     public static class RagConfig {
         private int chunkSize = 200;
         private int chunkOverlap = 50;
+        /** Parent chunks provide context for retrieved child chunks. Zero derives a sensible value. */
+        private int parentChunkSize = 0;
+        /** Zero derives twice the child overlap. */
+        private int parentChunkOverlap = 0;
         private int topK = 3;
         private int rrfConstantK = 60;
         private double semanticWeight = 0.7;
@@ -138,6 +142,10 @@ public class AppConfig {
         public void setChunkSize(int chunkSize) { this.chunkSize = chunkSize; }
         public int getChunkOverlap() { return chunkOverlap; }
         public void setChunkOverlap(int chunkOverlap) { this.chunkOverlap = chunkOverlap; }
+        public int getParentChunkSize() { return parentChunkSize; }
+        public void setParentChunkSize(int parentChunkSize) { this.parentChunkSize = parentChunkSize; }
+        public int getParentChunkOverlap() { return parentChunkOverlap; }
+        public void setParentChunkOverlap(int parentChunkOverlap) { this.parentChunkOverlap = parentChunkOverlap; }
         public int getTopK() { return topK; }
         public void setTopK(int topK) { this.topK = topK; }
         public int getRrfConstantK() { return rrfConstantK; }

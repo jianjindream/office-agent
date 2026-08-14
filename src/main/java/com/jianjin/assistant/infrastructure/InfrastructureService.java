@@ -157,8 +157,12 @@ public class InfrastructureService {
 
     // ================= RAG Chunks =================
 
-    public long saveRAGChunk(String docHash, int chunkIdx, String content, String embeddingJson) {
-        return ragChunkRepo.save(docHash, chunkIdx, content, embeddingJson);
+    public long saveRAGParentChunk(String docHash, int parentIdx, String content) {
+        return ragChunkRepo.saveParent(docHash, parentIdx, content);
+    }
+
+    public long saveRAGChunk(String docHash, int chunkIdx, Long parentId, String content, String embeddingJson) {
+        return ragChunkRepo.save(docHash, chunkIdx, parentId, content, embeddingJson);
     }
 
     public static class ChunkRow {
@@ -180,6 +184,20 @@ public class InfrastructureService {
         for (RagChunkRepository.Row r : ragChunkRepo.loadByIds(ids)) {
             ChunkRow row = new ChunkRow();
             row.id = r.id; row.content = r.content;
+            out.add(row);
+        }
+        return out;
+    }
+
+    public static class RagContextRow {
+        public long childId; public long contextId; public String content;
+    }
+
+    public List<RagContextRow> loadRAGContextsByChildIDs(List<Long> childIds) {
+        List<RagContextRow> out = new ArrayList<>();
+        for (RagChunkRepository.ContextRow r : ragChunkRepo.loadContextsByChildIds(childIds)) {
+            RagContextRow row = new RagContextRow();
+            row.childId = r.childId; row.contextId = r.contextId; row.content = r.content;
             out.add(row);
         }
         return out;

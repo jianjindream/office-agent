@@ -1,14 +1,14 @@
 package com.jianjin.assistant.service.graph;
 
 public class ChunkRef {
-    private final int id;
+    private final long id;
     private final String content;
 
-    public ChunkRef(int id, String content) {
+    public ChunkRef(long id, String content) {
         this.id = id;
         this.content = content;
     }
 
-    public int getId() { return id; }
+    public long getId() { return id; }
     public String getContent() { return content; }
 }

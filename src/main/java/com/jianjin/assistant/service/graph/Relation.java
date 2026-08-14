@@ -14,7 +14,7 @@ public class Relation {
     @JsonProperty("doc_hash")
     private String docHash;
     @JsonProperty("chunk_id")
-    private int chunkId;
+    private long chunkId;
 
     public Relation() {}
 
@@ -34,6 +34,6 @@ public class Relation {
     public void setWeight(double weight) { this.weight = weight; }
     public String getDocHash() { return docHash; }
     public void setDocHash(String docHash) { this.docHash = docHash; }
-    public int getChunkId() { return chunkId; }
-    public void setChunkId(int chunkId) { this.chunkId = chunkId; }
+    public long getChunkId() { return chunkId; }
+    public void setChunkId(long chunkId) { this.chunkId = chunkId; }
 }

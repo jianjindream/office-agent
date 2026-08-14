@@ -1,15 +1,17 @@
 package com.jianjin.assistant.service.rag;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jianjin.assistant.config.AppConfig;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
 import com.jianjin.assistant.model.Chunk;
+import com.jianjin.assistant.service.graph.ChunkRef;
 import com.jianjin.assistant.service.graph.GraphSearchResult;
 import com.jianjin.assistant.service.graph.KGStore;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -38,7 +40,6 @@ public class HybridStore {
         recomputeMode();
     }
 
-    /** 由 RagService 在基础设施初始化完成后调用一次以重算模式 */
     public void recomputeMode() {
         boolean milvusOK = "connected".equals(infra.getMilvusStatus());
         boolean esOK = "connected".equals(infra.getEsStatus());
@@ -52,46 +53,59 @@ public class HybridStore {
     public void setKGStore(KGStore kg) { this.kg = kg; }
     public String getMode() { return mode; }
 
-    /** Index：写入 PG + Milvus + ES，返回 docHash */
-    public String index(List<Chunk> chunks, String docContent) {
+    /**
+     * Persists large parent contexts and indexes only the small child chunks.
+     * The returned references use PostgreSQL child IDs, which keeps graph search
+     * and vector/keyword search on the same identifier space.
+     */
+    public IndexResult index(List<TextSplitter.ParentChunk> parents, String docContent) {
         String docHash = sha256(docContent).substring(0, 16);
-
+        // Re-ingesting the same document must replace every old child/vector rather
+        // than leaving stale rows when its chunking strategy changes.
+        List<Long> oldChildIds = infra.deleteRAGChunksByDocHash(docHash);
+        if (!oldChildIds.isEmpty()) {
+            if ("connected".equals(infra.getEsStatus())) infra.deleteRAGChunksFromES(oldChildIds);
+            if ("connected".equals(infra.getMilvusStatus())) infra.deleteRAGChunksFromMilvus(oldChildIds);
+            if (kg != null && kg.available()) kg.deleteDocument(docHash);
+        }
         List<Long> pgIds = new ArrayList<>();
         List<String> contents = new ArrayList<>();
         List<List<Float>> embeddings = new ArrayList<>();
+        List<ChunkRef> childRefs = new ArrayList<>();
 
-        for (int i = 0; i < chunks.size(); i++) {
-            Chunk c = chunks.get(i);
-            List<Double> emb = null;
-            if (embedFn != null) {
-                emb = embedFn.apply(c.getContent());
-            }
-            String embJson = "null";
-            if (emb != null && !emb.isEmpty()) {
-                try { embJson = mapper.writeValueAsString(emb); } catch (Exception ignored) {}
-            }
-            long pgId = infra.saveRAGChunk(docHash, i, c.getContent(), embJson);
-            if (pgId < 0) {
-                log.warn("RAG chunk 写入 PG 失败 (idx={})", i);
+        for (TextSplitter.ParentChunk parent : parents) {
+            long parentId = infra.saveRAGParentChunk(docHash, parent.getIndex(), parent.getContent());
+            if (parentId < 0) {
+                log.warn("RAG parent chunk save failed (index={})", parent.getIndex());
                 continue;
             }
-            // ES
-            if ("connected".equals(infra.getEsStatus())) {
-                infra.indexRAGChunkInES(pgId, c.getContent(), docHash, i);
-            }
-            // Milvus 收集批量插入
-            if ("connected".equals(infra.getMilvusStatus()) && emb != null && !emb.isEmpty()) {
-                pgIds.add(pgId);
-                contents.add(c.getContent());
-                List<Float> emb32 = new ArrayList<>(emb.size());
-                for (Double v : emb) emb32.add(v.floatValue());
-                embeddings.add(emb32);
+            for (Chunk child : parent.getChildren()) {
+                List<Double> embedding = embedFn == null ? null : embedFn.apply(child.getContent());
+                String embeddingJson = "null";
+                if (embedding != null && !embedding.isEmpty()) {
+                    try { embeddingJson = mapper.writeValueAsString(embedding); } catch (Exception ignored) { }
+                }
+                long childId = infra.saveRAGChunk(docHash, child.getId(), parentId,
+                        child.getContent(), embeddingJson);
+                if (childId < 0) {
+                    log.warn("RAG child chunk save failed (index={})", child.getId());
+                    continue;
+                }
+                childRefs.add(new ChunkRef(childId, child.getContent()));
+                if ("connected".equals(infra.getEsStatus())) {
+                    infra.indexRAGChunkInES(childId, child.getContent(), docHash, child.getId());
+                }
+                if ("connected".equals(infra.getMilvusStatus()) && embedding != null && !embedding.isEmpty()) {
+                    pgIds.add(childId);
+                    contents.add(child.getContent());
+                    List<Float> embedding32 = new ArrayList<>(embedding.size());
+                    for (Double value : embedding) embedding32.add(value.floatValue());
+                    embeddings.add(embedding32);
+                }
             }
         }
-        if (!pgIds.isEmpty()) {
-            infra.insertRAGChunks(pgIds, contents, embeddings);
-        }
-        return docHash;
+        if (!pgIds.isEmpty()) infra.insertRAGChunks(pgIds, contents, embeddings);
+        return new IndexResult(docHash, childRefs);
     }
 
     public List<Long> delete(String docHash) {
@@ -103,7 +117,7 @@ public class HybridStore {
     }
 
     public void restoreChunks(List<Chunk> chunks) {
-        // chunks 已在 PG 中，无需额外操作
+        // PostgreSQL remains the source of truth; parent context is loaded at query time.
     }
 
     public List<SearchResult> search(String query, int topK) {
@@ -116,112 +130,96 @@ public class HybridStore {
         };
     }
 
-    // ============ Hybrid: RRF 融合 ============
-
     private List<SearchResult> searchHybrid(String query, int topK) {
         if (embedFn == null) return searchKeyword(query, topK);
-        List<Double> emb = embedFn.apply(query);
-        if (emb == null || emb.isEmpty()) {
-            log.warn("查询向量化失败，降级到关键词检索");
-            return searchKeyword(query, topK);
-        }
-        List<Float> queryVec = new ArrayList<>(emb.size());
-        for (Double v : emb) queryVec.add(v.floatValue());
+        List<Double> embedding = embedFn.apply(query);
+        if (embedding == null || embedding.isEmpty()) return searchKeyword(query, topK);
 
-        int fetchK = Math.max(10, topK * 2);
-        List<InfrastructureService.MilvusHit> milvusHits = infra.milvusSearchWithScores(queryVec, fetchK);
+        List<Float> queryVector = new ArrayList<>(embedding.size());
+        for (Double value : embedding) queryVector.add(value.floatValue());
+        int fetchK = childFetchK(topK);
+        List<InfrastructureService.MilvusHit> milvusHits = infra.milvusSearchWithScores(queryVector, fetchK);
         List<InfrastructureService.ESHit> esHits = infra.searchRAGChunks(query, fetchK);
-
-        if (milvusHits.isEmpty() && esHits.isEmpty()) {
-            return Collections.emptyList();
-        }
+        if (milvusHits.isEmpty() && esHits.isEmpty()) return Collections.emptyList();
 
         int k = cfg.getRag().getRrfConstantK() > 0 ? cfg.getRag().getRrfConstantK() : 60;
         Map<Long, Double> rrf = new HashMap<>();
         for (int i = 0; i < milvusHits.size(); i++) {
-            long id = milvusHits.get(i).id;
-            rrf.merge(id, 1.0 / (k + i + 1), Double::sum);
+            rrf.merge(milvusHits.get(i).id, 1.0 / (k + i + 1), Double::sum);
         }
         for (int i = 0; i < esHits.size(); i++) {
-            long id = esHits.get(i).pgId;
-            rrf.merge(id, 1.0 / (k + i + 1), Double::sum);
+            rrf.merge(esHits.get(i).pgId, 1.0 / (k + i + 1), Double::sum);
         }
-
-        // 知识图谱第三路融合
         if (kg != null && kg.available()) {
             List<GraphSearchResult> kgHits = kg.search(query, fetchK);
             for (int i = 0; i < kgHits.size(); i++) {
-                long id = kgHits.get(i).getChunkId();
-                double extra = kgHits.get(i).getScore() + 1.0 / (k + i + 1);
-                rrf.merge(id, extra, Double::sum);
+                GraphSearchResult hit = kgHits.get(i);
+                rrf.merge(hit.getChunkId(), hit.getScore() + 1.0 / (k + i + 1), Double::sum);
             }
         }
 
-        List<Map.Entry<Long, Double>> sorted = new ArrayList<>(rrf.entrySet());
-        sorted.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
-        if (sorted.size() > topK) sorted = sorted.subList(0, topK);
-
-        List<Long> ids = new ArrayList<>();
-        for (Map.Entry<Long, Double> e : sorted) ids.add(e.getKey());
-        Map<Long, String> contentMap = loadContentMap(ids);
-
-        List<SearchResult> results = new ArrayList<>();
-        for (Map.Entry<Long, Double> e : sorted) {
-            String content = contentMap.get(e.getKey());
-            if (content == null) continue;
-            results.add(new SearchResult(new Chunk(0, content), e.getValue(), "hybrid"));
-        }
-        return results;
+        List<Map.Entry<Long, Double>> ranked = new ArrayList<>(rrf.entrySet());
+        ranked.sort((left, right) -> Double.compare(right.getValue(), left.getValue()));
+        List<ChildHit> childHits = new ArrayList<>();
+        for (Map.Entry<Long, Double> hit : ranked) childHits.add(new ChildHit(hit.getKey(), hit.getValue()));
+        return expandToParentContexts(childHits, topK, "hybrid");
     }
 
     private List<SearchResult> searchSemantic(String query, int topK) {
         if (embedFn == null) return Collections.emptyList();
-        List<Double> emb = embedFn.apply(query);
-        if (emb == null || emb.isEmpty()) return Collections.emptyList();
-        List<Float> queryVec = new ArrayList<>(emb.size());
-        for (Double v : emb) queryVec.add(v.floatValue());
+        List<Double> embedding = embedFn.apply(query);
+        if (embedding == null || embedding.isEmpty()) return Collections.emptyList();
+        List<Float> queryVector = new ArrayList<>(embedding.size());
+        for (Double value : embedding) queryVector.add(value.floatValue());
 
-        List<InfrastructureService.MilvusHit> hits = infra.milvusSearchWithScores(queryVec, topK);
-        List<Long> ids = new ArrayList<>();
-        for (InfrastructureService.MilvusHit h : hits) ids.add(h.id);
-        Map<Long, String> contentMap = loadContentMap(ids);
-
-        List<SearchResult> results = new ArrayList<>();
-        for (InfrastructureService.MilvusHit h : hits) {
-            String content = contentMap.get(h.id);
-            if (content == null) continue;
-            results.add(new SearchResult(new Chunk(0, content), h.distance, "semantic"));
-        }
-        return results;
+        List<InfrastructureService.MilvusHit> hits = infra.milvusSearchWithScores(queryVector, childFetchK(topK));
+        List<ChildHit> childHits = new ArrayList<>();
+        // Milvus uses L2 distance (smaller is better); rank is a safe comparable relevance score.
+        for (int i = 0; i < hits.size(); i++) childHits.add(new ChildHit(hits.get(i).id, 1.0 / (i + 1)));
+        return expandToParentContexts(childHits, topK, "semantic");
     }
 
     private List<SearchResult> searchKeyword(String query, int topK) {
-        List<InfrastructureService.ESHit> hits = infra.searchRAGChunks(query, topK);
-        List<Long> ids = new ArrayList<>();
-        for (InfrastructureService.ESHit h : hits) ids.add(h.pgId);
-        Map<Long, String> contentMap = loadContentMap(ids);
+        List<InfrastructureService.ESHit> hits = infra.searchRAGChunks(query, childFetchK(topK));
+        List<ChildHit> childHits = new ArrayList<>();
+        for (InfrastructureService.ESHit hit : hits) childHits.add(new ChildHit(hit.pgId, hit.score));
+        return expandToParentContexts(childHits, topK, "keyword");
+    }
 
-        List<SearchResult> results = new ArrayList<>();
-        for (InfrastructureService.ESHit h : hits) {
-            String content = contentMap.get(h.pgId);
-            if (content == null) continue;
-            results.add(new SearchResult(new Chunk(0, content), h.score, "keyword"));
+    /** Collapses retrieved children to parent contexts using max child relevance. */
+    private List<SearchResult> expandToParentContexts(List<ChildHit> childHits, int topK, String source) {
+        if (childHits.isEmpty()) return Collections.emptyList();
+        List<Long> childIds = new ArrayList<>();
+        for (ChildHit hit : childHits) childIds.add(hit.childId);
+
+        Map<Long, InfrastructureService.RagContextRow> contextByChild = new HashMap<>();
+        for (InfrastructureService.RagContextRow row : infra.loadRAGContextsByChildIDs(childIds)) {
+            contextByChild.put(row.childId, row);
         }
+        Map<Long, SearchResult> parentResults = new LinkedHashMap<>();
+        for (ChildHit hit : childHits) {
+            InfrastructureService.RagContextRow context = contextByChild.get(hit.childId);
+            if (context == null || context.content == null) continue;
+            SearchResult current = parentResults.get(context.contextId);
+            if (current == null || hit.score > current.score) {
+                parentResults.put(context.contextId,
+                        new SearchResult(new Chunk(0, context.content), hit.score, source));
+            }
+        }
+        List<SearchResult> results = new ArrayList<>(parentResults.values());
+        results.sort((left, right) -> Double.compare(right.score, left.score));
+        if (results.size() > topK) return new ArrayList<>(results.subList(0, topK));
         return results;
     }
 
-    private Map<Long, String> loadContentMap(List<Long> ids) {
-        Map<Long, String> map = new LinkedHashMap<>();
-        if (ids == null || ids.isEmpty()) return map;
-        List<InfrastructureService.ChunkRow> rows = infra.loadRAGChunksByIDs(ids);
-        for (InfrastructureService.ChunkRow r : rows) map.put(r.id, r.content);
-        return map;
+    private int childFetchK(int parentTopK) {
+        return Math.max(10, parentTopK * 4);
     }
 
     private String sha256(String input) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(input.getBytes());
+            byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
             StringBuilder hex = new StringBuilder();
             for (byte b : hash) hex.append(String.format("%02x", b));
             return hex.toString();
@@ -236,7 +234,29 @@ public class HybridStore {
         public String source;
 
         public SearchResult(Chunk chunk, double score, String source) {
-            this.chunk = chunk; this.score = score; this.source = source;
+            this.chunk = chunk;
+            this.score = score;
+            this.source = source;
+        }
+    }
+
+    public static class IndexResult {
+        public final String docHash;
+        public final List<ChunkRef> childRefs;
+
+        public IndexResult(String docHash, List<ChunkRef> childRefs) {
+            this.docHash = docHash;
+            this.childRefs = childRefs;
+        }
+    }
+
+    private static class ChildHit {
+        private final long childId;
+        private final double score;
+
+        private ChildHit(long childId, double score) {
+            this.childId = childId;
+            this.score = score;
         }
     }
 }

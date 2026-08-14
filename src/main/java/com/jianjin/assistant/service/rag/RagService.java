@@ -49,6 +49,12 @@ public class RagService {
         this.infra = infra;
         this.splitter.setChunkSize(cfg.getRag().getChunkSize());
         this.splitter.setOverlap(cfg.getRag().getChunkOverlap());
+        this.splitter.setParentChunkSize(cfg.getRag().getParentChunkSize() > 0
+                ? cfg.getRag().getParentChunkSize()
+                : Math.max(cfg.getRag().getChunkSize() * 4, 600));
+        this.splitter.setParentOverlap(cfg.getRag().getParentChunkOverlap() > 0
+                ? cfg.getRag().getParentChunkOverlap()
+                : cfg.getRag().getChunkOverlap() * 2);
     }
 
     public void setGenerateFn(BiFunction<String, String, String> fn) { this.generateFn = fn; }
@@ -69,19 +75,17 @@ public class RagService {
     public String getMode() { return store.getMode(); }
 
     public Map.Entry<Integer, String> ingest(String doc) {
-        List<Chunk> chunks = splitter.split(doc);
-        String docHash = store.index(chunks, doc);
+        List<TextSplitter.ParentChunk> parents = splitter.splitParentChild(doc);
+        HybridStore.IndexResult indexed = store.index(parents, doc);
         loaded = true;
         infra.publishEvent("rag.ingest",
                 String.format("{\"chunk_count\":%d,\"mode\":\"%s\",\"doc_hash\":\"%s\"}",
-                        chunks.size(), store.getMode(), docHash));
+                        indexed.childRefs.size(), store.getMode(), indexed.docHash));
         // 异步建图
         if (kg != null && kg.available()) {
-            List<ChunkRef> refs = new ArrayList<>();
-            for (Chunk c : chunks) refs.add(new ChunkRef(c.getId(), c.getContent()));
-            new Thread(() -> kg.indexDocument(docHash, refs), "kg-index").start();
+            new Thread(() -> kg.indexDocument(indexed.docHash, indexed.childRefs), "kg-index").start();
         }
-        return Map.entry(chunks.size(), docHash);
+        return Map.entry(indexed.childRefs.size(), indexed.docHash);
     }
 
     public void delete(String docHash) {

@@ -149,10 +149,10 @@ public class KGStore {
                     "hops", hops,
                     "limit", topK * 3L
             ));
-            Set<Integer> seen = new HashSet<>();
+            Set<Long> seen = new HashSet<>();
             while (rs.hasNext()) {
                 Record rec = rs.next();
-                int cid = rec.get("cid").asInt(-1);
+                long cid = rec.get("cid").asLong(-1);
                 if (cid < 0 || seen.contains(cid)) continue;
                 seen.add(cid);
                 List<String> seeds = rec.get("seeds").asList(Value::asString);
@@ -179,10 +179,10 @@ public class KGStore {
                     "MATCH (e:Entity) WHERE e.name IN $names AND e.chunk_id IS NOT NULL " +
                             "RETURN e.chunk_id AS cid, e.name AS name ORDER BY cid LIMIT $limit",
                     Values.parameters("names", names, "limit", (long) topK));
-            Set<Integer> seen = new HashSet<>();
+            Set<Long> seen = new HashSet<>();
             while (rs.hasNext()) {
                 Record rec = rs.next();
-                int cid = rec.get("cid").asInt(-1);
+                long cid = rec.get("cid").asLong(-1);
                 String name = rec.get("name").asString("");
                 if (cid < 0 || seen.contains(cid)) continue;
                 seen.add(cid);

@@ -36,6 +36,9 @@ app:
   rag:
     chunk-size: 200
     chunk-overlap: 50
+    # Small-to-big chunking: retrieve 200-character children, send 800-character parents to the LLM.
+    parent-chunk-size: 800
+    parent-chunk-overlap: 100
     top-k: 3
     rrf-constant-k: 60
     semantic-weight: 0.7

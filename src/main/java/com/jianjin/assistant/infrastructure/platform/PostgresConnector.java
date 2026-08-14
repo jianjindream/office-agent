@@ -61,10 +61,17 @@ public class PostgresConnector {
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS tags JSONB",
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS slot_hint TEXT",
                 """
+                CREATE TABLE IF NOT EXISTS rag_parent_chunks (
+                    id BIGSERIAL PRIMARY KEY, doc_hash TEXT NOT NULL, parent_idx INT NOT NULL,
+                    content TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(doc_hash, parent_idx))""",
+                """
                 CREATE TABLE IF NOT EXISTS rag_chunks (
                     id BIGSERIAL PRIMARY KEY, doc_hash TEXT NOT NULL, chunk_idx INT NOT NULL,
                     content TEXT NOT NULL, embedding JSONB, created_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(doc_hash, chunk_idx))"""
+                    UNIQUE(doc_hash, chunk_idx))""",
+                "ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS parent_id BIGINT",
+                "CREATE INDEX IF NOT EXISTS idx_rag_chunks_parent_id ON rag_chunks(parent_id)"
         };
         try (Statement stmt = conn.createStatement()) {
             for (String ddl : ddls) stmt.execute(ddl);
