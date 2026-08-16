@@ -140,28 +140,45 @@ public class HybridStore {
         int fetchK = childFetchK(topK);
         List<InfrastructureService.MilvusHit> milvusHits = infra.milvusSearchWithScores(queryVector, fetchK);
         List<InfrastructureService.ESHit> esHits = infra.searchRAGChunks(query, fetchK);
-        if (milvusHits.isEmpty() && esHits.isEmpty()) return Collections.emptyList();
-
-        int k = cfg.getRag().getRrfConstantK() > 0 ? cfg.getRag().getRrfConstantK() : 60;
-        Map<Long, Double> rrf = new HashMap<>();
-        for (int i = 0; i < milvusHits.size(); i++) {
-            rrf.merge(milvusHits.get(i).id, 1.0 / (k + i + 1), Double::sum);
-        }
-        for (int i = 0; i < esHits.size(); i++) {
-            rrf.merge(esHits.get(i).pgId, 1.0 / (k + i + 1), Double::sum);
-        }
+        List<GraphSearchResult> kgHits = Collections.emptyList();
         if (kg != null && kg.available()) {
-            List<GraphSearchResult> kgHits = kg.search(query, fetchK);
-            for (int i = 0; i < kgHits.size(); i++) {
-                GraphSearchResult hit = kgHits.get(i);
-                rrf.merge(hit.getChunkId(), hit.getScore() + 1.0 / (k + i + 1), Double::sum);
+            kgHits = kg.search(query, fetchK);
+        }
+        if (milvusHits.isEmpty() && esHits.isEmpty() && kgHits.isEmpty()) return Collections.emptyList();
+
+        int k = rrfConstant();
+        Map<Long, FusionHit> rrf = new HashMap<>();
+        double activeWeight = 0;
+        if (!milvusHits.isEmpty()) {
+            double weight = sourceWeight(cfg.getRag().getSemanticWeight(), 0.7);
+            activeWeight += weight;
+            for (int i = 0; i < milvusHits.size(); i++) {
+                mergeRrf(rrf, milvusHits.get(i).id, weight / (k + i + 1), SearchSource.MILVUS);
             }
         }
+        if (!esHits.isEmpty()) {
+            double weight = sourceWeight(cfg.getRag().getKeywordWeight(), 1.0);
+            activeWeight += weight;
+            for (int i = 0; i < esHits.size(); i++) {
+                mergeRrf(rrf, esHits.get(i).pgId, weight / (k + i + 1), SearchSource.ES);
+            }
+        }
+        if (!kgHits.isEmpty()) {
+            // GraphSearchResult.score ranks graph hits internally; cross-source fusion uses rank only.
+            double weight = sourceWeight(cfg.getNeo4j().getWeight(), 0.3);
+            activeWeight += weight;
+            for (int i = 0; i < kgHits.size(); i++) {
+                mergeRrf(rrf, kgHits.get(i).getChunkId(), weight / (k + i + 1), SearchSource.NEO4J);
+            }
+        }
+        if (activeWeight <= 0) return Collections.emptyList();
 
-        List<Map.Entry<Long, Double>> ranked = new ArrayList<>(rrf.entrySet());
-        ranked.sort((left, right) -> Double.compare(right.getValue(), left.getValue()));
+        List<Map.Entry<Long, FusionHit>> ranked = new ArrayList<>(rrf.entrySet());
+        ranked.sort((left, right) -> Double.compare(right.getValue().score, left.getValue().score));
         List<ChildHit> childHits = new ArrayList<>();
-        for (Map.Entry<Long, Double> hit : ranked) childHits.add(new ChildHit(hit.getKey(), hit.getValue()));
+        for (Map.Entry<Long, FusionHit> hit : ranked) {
+            childHits.add(new ChildHit(hit.getKey(), hit.getValue().score / activeWeight, hit.getValue().sourceMask));
+        }
         return expandToParentContexts(childHits, topK, "hybrid");
     }
 
@@ -174,15 +191,18 @@ public class HybridStore {
 
         List<InfrastructureService.MilvusHit> hits = infra.milvusSearchWithScores(queryVector, childFetchK(topK));
         List<ChildHit> childHits = new ArrayList<>();
-        // Milvus uses L2 distance (smaller is better); rank is a safe comparable relevance score.
-        for (int i = 0; i < hits.size(); i++) childHits.add(new ChildHit(hits.get(i).id, 1.0 / (i + 1)));
+        for (int i = 0; i < hits.size(); i++) {
+            childHits.add(new ChildHit(hits.get(i).id, 1.0 / (rrfConstant() + i + 1), SearchSource.MILVUS.mask));
+        }
         return expandToParentContexts(childHits, topK, "semantic");
     }
 
     private List<SearchResult> searchKeyword(String query, int topK) {
         List<InfrastructureService.ESHit> hits = infra.searchRAGChunks(query, childFetchK(topK));
         List<ChildHit> childHits = new ArrayList<>();
-        for (InfrastructureService.ESHit hit : hits) childHits.add(new ChildHit(hit.pgId, hit.score));
+        for (int i = 0; i < hits.size(); i++) {
+            childHits.add(new ChildHit(hits.get(i).pgId, 1.0 / (rrfConstant() + i + 1), SearchSource.ES.mask));
+        }
         return expandToParentContexts(childHits, topK, "keyword");
     }
 
@@ -201,9 +221,17 @@ public class HybridStore {
             InfrastructureService.RagContextRow context = contextByChild.get(hit.childId);
             if (context == null || context.content == null) continue;
             SearchResult current = parentResults.get(context.contextId);
-            if (current == null || hit.score > current.score) {
-                parentResults.put(context.contextId,
-                        new SearchResult(new Chunk(0, context.content), hit.score, source));
+            if (current == null) {
+                parentResults.put(context.contextId, new SearchResult(
+                        context.contextId, new Chunk(0, context.content), hit.score, source, hit.sourceMask));
+            } else {
+                current.sourceMask |= hit.sourceMask;
+                current.sourceSupportCount = Integer.bitCount(current.sourceMask);
+                if (hit.score > current.score) {
+                    current.chunk = new Chunk(0, context.content);
+                    current.score = hit.score;
+                    current.source = source;
+                }
             }
         }
         List<SearchResult> results = new ArrayList<>(parentResults.values());
@@ -214,6 +242,20 @@ public class HybridStore {
 
     private int childFetchK(int parentTopK) {
         return Math.max(10, parentTopK * 4);
+    }
+
+    private int rrfConstant() {
+        return cfg.getRag().getRrfConstantK() > 0 ? cfg.getRag().getRrfConstantK() : 60;
+    }
+
+    private static double sourceWeight(double configured, double fallback) {
+        return configured > 0 ? configured : fallback;
+    }
+
+    private static void mergeRrf(Map<Long, FusionHit> rrf, long id, double contribution, SearchSource source) {
+        FusionHit hit = rrf.computeIfAbsent(id, ignored -> new FusionHit());
+        hit.score += contribution;
+        hit.sourceMask |= source.mask;
     }
 
     private String sha256(String input) {
@@ -229,14 +271,20 @@ public class HybridStore {
     }
 
     public static class SearchResult {
+        public long contextId;
         public Chunk chunk;
         public double score;
         public String source;
+        public int sourceSupportCount;
+        private int sourceMask;
 
-        public SearchResult(Chunk chunk, double score, String source) {
+        public SearchResult(long contextId, Chunk chunk, double score, String source, int sourceMask) {
+            this.contextId = contextId;
             this.chunk = chunk;
             this.score = score;
             this.source = source;
+            this.sourceMask = sourceMask;
+            this.sourceSupportCount = Integer.bitCount(sourceMask);
         }
     }
 
@@ -253,10 +301,27 @@ public class HybridStore {
     private static class ChildHit {
         private final long childId;
         private final double score;
+        private final int sourceMask;
 
-        private ChildHit(long childId, double score) {
+        private ChildHit(long childId, double score, int sourceMask) {
             this.childId = childId;
             this.score = score;
+            this.sourceMask = sourceMask;
+        }
+    }
+
+    private static class FusionHit {
+        private double score;
+        private int sourceMask;
+    }
+
+    private enum SearchSource {
+        MILVUS(1), ES(2), NEO4J(4);
+
+        private final int mask;
+
+        SearchSource(int mask) {
+            this.mask = mask;
         }
     }
 }

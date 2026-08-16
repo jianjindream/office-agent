@@ -2,6 +2,8 @@ package com.jianjin.assistant.service.rag;
 
 import com.jianjin.assistant.config.AppConfig;
 import com.jianjin.assistant.domain.rag.HistoryMessage;
+import com.jianjin.assistant.domain.rag.QuerySpec;
+import com.jianjin.assistant.domain.rag.QueryType;
 import com.jianjin.assistant.domain.rag.Reranker;
 import com.jianjin.assistant.domain.rag.Rewriter;
 import com.jianjin.assistant.infrastructure.InfrastructureService;
@@ -9,6 +11,7 @@ import com.jianjin.assistant.model.Chunk;
 import com.jianjin.assistant.service.graph.ChunkRef;
 import com.jianjin.assistant.service.graph.KGStore;
 import com.jianjin.assistant.service.memory.LongTermMemory;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -21,6 +24,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -41,6 +48,7 @@ public class RagService {
     private Function<String, List<Double>> embedFn;
     private Rewriter rewriter;
     private Reranker reranker;
+    private final ExecutorService expansionExecutor;
 
     public RagService(AppConfig cfg, HybridStore store, TextSplitter splitter, InfrastructureService infra) {
         this.cfg = cfg;
@@ -55,6 +63,13 @@ public class RagService {
         this.splitter.setParentOverlap(cfg.getRag().getParentChunkOverlap() > 0
                 ? cfg.getRag().getParentChunkOverlap()
                 : cfg.getRag().getChunkOverlap() * 2);
+        int parallelism = Math.min(2, Math.max(1, cfg.getRag().getRewrite().getParallelism()));
+        ThreadFactory threadFactory = runnable -> {
+            Thread thread = new Thread(runnable, "rag-query-expand");
+            thread.setDaemon(true);
+            return thread;
+        };
+        this.expansionExecutor = Executors.newFixedThreadPool(parallelism, threadFactory);
     }
 
     public void setGenerateFn(BiFunction<String, String, String> fn) { this.generateFn = fn; }
@@ -73,6 +88,11 @@ public class RagService {
 
     public boolean isLoaded() { return loaded; }
     public String getMode() { return store.getMode(); }
+
+    @PreDestroy
+    public void close() {
+        expansionExecutor.shutdownNow();
+    }
 
     public Map.Entry<Integer, String> ingest(String doc) {
         List<TextSplitter.ParentChunk> parents = splitter.splitParentChild(doc);
@@ -104,17 +124,22 @@ public class RagService {
             return new QueryResult("知识库为空，请先上传文档。", Collections.emptyList());
         }
 
-        // 1) Rewrite
-        List<String> queries = new ArrayList<>();
-        queries.add(question);
-        if (rewriter != null) {
-            List<String> rewritten = rewriter.rewrite(question, history);
-            if (rewritten != null && !rewritten.isEmpty()) queries = rewritten;
-        }
+        List<HistoryMessage> safeHistory = history == null ? Collections.emptyList() : history;
+        QuerySpec primary = rewriter == null
+                ? new QuerySpec(question, QueryType.PRIMARY)
+                : rewriter.rewritePrimary(question, safeHistory);
+        if (primary.text().isBlank()) primary = new QuerySpec(question, QueryType.PRIMARY);
 
-        // 2) 多查询合并（fetch 4× topK 给 reranker 留余量）
+        // Fetch extra parent contexts only when reranking is enabled.
         int fetchK = reranker != null ? Math.max(cfg.getRag().getTopK() * 4, 10) : cfg.getRag().getTopK();
-        List<ScoredChunk> results = searchMulti(queries, fetchK);
+        List<HybridStore.SearchResult> primaryHits = store.search(primary.text(), fetchK);
+        List<ScoredChunk> results = toScored(primaryHits);
+        if (shouldExpand(primaryHits) && rewriter != null) {
+            List<QuerySpec> variants = rewriter.expand(primary.text(), safeHistory);
+            if (variants != null && !variants.isEmpty()) {
+                results = mergePrimaryAndVariants(primary, primaryHits, variants, fetchK);
+            }
+        }
 
         // unavailable 模式：兜底 TF
         if (results.isEmpty() && "unavailable".equals(store.getMode())) {
@@ -138,9 +163,7 @@ public class RagService {
         String answer;
         if (generateFn != null) {
             String systemPrompt = "你是一个基于知识库回答问题的助手。请仅根据提供的上下文内容回答问题，不要编造信息。如果上下文不足以回答，请说明。";
-            // 给 LLM 的查询用第一条改写（独立化后的版本）
-            String askQuery = queries.isEmpty() ? question : queries.get(0);
-            String userMsg = String.format("上下文：\n%s\n\n问题：%s", context, askQuery);
+            String userMsg = String.format("上下文：\n%s\n\n问题：%s", context, primary.text());
             answer = generateFn.apply(systemPrompt, userMsg);
         } else {
             answer = "【知识库检索结果】\n" + context;
@@ -150,35 +173,88 @@ public class RagService {
 
     public List<ScoredChunk> searchMulti(List<String> queries, int topK) {
         if (queries == null || queries.isEmpty()) return Collections.emptyList();
-        if (queries.size() == 1) {
-            List<HybridStore.SearchResult> hits = store.search(queries.get(0), topK);
-            return toScored(hits);
-        }
-        // 并发检索每条 query，按 chunk 内容做 RRF 合并
-        Map<String, double[]> rrf = new LinkedHashMap<>(); // contentHash -> [score, lastIdx]
-        Map<String, Chunk> chunkMap = new HashMap<>();
-        int k = cfg.getRag().getRrfConstantK() > 0 ? cfg.getRag().getRrfConstantK() : 60;
+        QuerySpec primary = new QuerySpec(queries.get(0), QueryType.PRIMARY);
+        List<HybridStore.SearchResult> primaryHits = store.search(primary.text(), topK);
+        List<QuerySpec> variants = new ArrayList<>();
+        for (int i = 1; i < queries.size(); i++) variants.add(new QuerySpec(queries.get(i), QueryType.VARIANT));
+        return variants.isEmpty() ? toScored(primaryHits) : mergePrimaryAndVariants(primary, primaryHits, variants, topK);
+    }
 
-        for (String q : queries) {
-            List<HybridStore.SearchResult> hits = store.search(q, topK);
-            for (int i = 0; i < hits.size(); i++) {
-                String content = hits.get(i).chunk.getContent();
-                String key = content == null ? String.valueOf(hits.get(i).chunk.getId()) : content;
-                rrf.computeIfAbsent(key, s -> new double[]{0, 0})[0] += 1.0 / (k + i + 1);
-                chunkMap.putIfAbsent(key, hits.get(i).chunk);
+    private boolean shouldExpand(List<HybridStore.SearchResult> primaryHits) {
+        if (cfg.getRag().getRewrite().getNumQueries() <= 1 || "unavailable".equals(store.getMode())) return false;
+        if (primaryHits == null || primaryHits.size() < cfg.getRag().getTopK()) return true;
+        if (!"hybrid".equals(store.getMode())) return false;
+        return primaryHits.stream().noneMatch(hit -> hit.sourceSupportCount >= 2);
+    }
+
+    private List<ScoredChunk> mergePrimaryAndVariants(QuerySpec primary,
+                                                       List<HybridStore.SearchResult> primaryHits,
+                                                       List<QuerySpec> variants,
+                                                       int topK) {
+        List<QueryHits> all = new ArrayList<>();
+        all.add(new QueryHits(primary, primaryHits));
+        List<CompletableFuture<QueryHits>> futures = new ArrayList<>();
+        for (QuerySpec variant : variants) {
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    return new QueryHits(variant, store.search(variant.text(), topK));
+                } catch (Exception e) {
+                    log.warn("Expanded query search failed; skipping variant: {}", e.getMessage());
+                    return new QueryHits(variant, Collections.emptyList());
+                }
+            }, expansionExecutor));
+        }
+        for (CompletableFuture<QueryHits> future : futures) {
+            try {
+                all.add(future.join());
+            } catch (Exception e) {
+                log.warn("Expanded query task failed; skipping variant: {}", e.getMessage());
             }
         }
-        if (rrf.isEmpty()) return Collections.emptyList();
+        return fuseQueryHits(all, topK);
+    }
 
-        List<Map.Entry<String, double[]>> sorted = new ArrayList<>(rrf.entrySet());
-        sorted.sort((a, b) -> Double.compare(b.getValue()[0], a.getValue()[0]));
-        if (sorted.size() > topK) sorted = sorted.subList(0, topK);
+    private List<ScoredChunk> fuseQueryHits(List<QueryHits> queryHits, int topK) {
+        List<QueryHits> active = queryHits.stream()
+                .filter(item -> item.hits != null && !item.hits.isEmpty())
+                .toList();
+        if (active.isEmpty()) return Collections.emptyList();
+        if (active.size() == 1) return toScored(active.get(0).hits);
 
+        Map<Long, FusedContext> rrf = new LinkedHashMap<>();
+        double totalWeight = 0;
+        int k = cfg.getRag().getRrfConstantK() > 0 ? cfg.getRag().getRrfConstantK() : 60;
+        for (QueryHits query : active) {
+            double weight = queryWeight(query.spec.type());
+            totalWeight += weight;
+            for (int i = 0; i < query.hits.size(); i++) {
+                HybridStore.SearchResult hit = query.hits.get(i);
+                if (hit == null || hit.chunk == null) continue;
+                FusedContext context = rrf.computeIfAbsent(hit.contextId,
+                        ignored -> new FusedContext(hit.chunk));
+                context.score += weight / (k + i + 1);
+            }
+        }
+        if (rrf.isEmpty() || totalWeight <= 0) return Collections.emptyList();
+
+        List<Map.Entry<Long, FusedContext>> sorted = new ArrayList<>(rrf.entrySet());
+        sorted.sort((left, right) -> Double.compare(right.getValue().score, left.getValue().score));
         List<ScoredChunk> out = new ArrayList<>();
-        for (Map.Entry<String, double[]> e : sorted) {
-            out.add(new ScoredChunk(chunkMap.get(e.getKey()), e.getValue()[0]));
+        for (Map.Entry<Long, FusedContext> item : sorted) {
+            out.add(new ScoredChunk(item.getValue().chunk, item.getValue().score / totalWeight));
+            if (out.size() == topK) break;
         }
         return out;
+    }
+
+    private double queryWeight(QueryType type) {
+        return switch (type) {
+            case PRIMARY -> 1.0;
+            case VARIANT -> cfg.getRag().getRewrite().getVariantWeight() > 0
+                    ? cfg.getRag().getRewrite().getVariantWeight() : 0.8;
+            case BROAD -> cfg.getRag().getRewrite().getBroadWeight() > 0
+                    ? cfg.getRag().getRewrite().getBroadWeight() : 0.6;
+        };
     }
 
     private List<ScoredChunk> toScored(List<HybridStore.SearchResult> hits) {
@@ -186,6 +262,17 @@ public class RagService {
         if (hits == null) return out;
         for (HybridStore.SearchResult r : hits) out.add(new ScoredChunk(r.chunk, r.score));
         return out;
+    }
+
+    private record QueryHits(QuerySpec spec, List<HybridStore.SearchResult> hits) {}
+
+    private static class FusedContext {
+        private final Chunk chunk;
+        private double score;
+
+        private FusedContext(Chunk chunk) {
+            this.chunk = chunk;
+        }
     }
 
     public List<Chunk> getChunks() {

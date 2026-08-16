@@ -41,9 +41,18 @@ app:
     parent-chunk-overlap: 100
     top-k: 3
     rrf-constant-k: 60
+    # 一级加权 RRF：Milvus 0.7、ES 1.0、Neo4j 使用 app.neo4j.weight（默认 0.3）。
     semantic-weight: 0.7
+    keyword-weight: 1.0
     enable-hybrid-search: true
     rag-milvus-dim: 2048
+    # 先检索主 query；仅在结果不足或缺少跨路共识时扩展最多 num-queries 条。
+    rewrite:
+      enabled: true
+      num-queries: 3
+      variant-weight: 0.8
+      broad-weight: 0.6
+      parallelism: 2
   memory:
     short-term-max-turns: 5
     long-term-top-k: 3

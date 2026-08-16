@@ -321,6 +321,8 @@ sequenceDiagram
 
 - **RAG 检索增强**：
     - 支持三路混合检索（Milvus 语义向量、ES BM25 关键词、Neo4j 知识图谱），RRF 融合排序。
+    - 一级加权 RRF 默认权重为 Milvus 0.7、ES 1.0、Neo4j 0.3；图分仅用于 Neo4j 内部排序。
+    - 查询改写默认启用：先检索一条自包含主 query，仅在结果不足或缺少跨路共识时扩展变体，并以二级加权 RRF 合并。
     - 文本分块采用窗口重叠，提升召回覆盖率。
     - 检索模式自动切换，单路故障自动降级，支持企业级高可用。
     - 检索结果结构化，便于 LLM 合成与追溯。
@@ -385,4 +387,3 @@ docker compose up -d --build
 - `search.api_key` — Tavily 搜索 API Key（可选）
 
 > 所有基础设施（Milvus/PG/ES/Kafka/Neo4j）均为可选，连接失败自动降级为内存模式，不影响启动。
-

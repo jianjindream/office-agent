@@ -130,6 +130,7 @@ public class AppConfig {
         private int topK = 3;
         private int rrfConstantK = 60;
         private double semanticWeight = 0.7;
+        private double keywordWeight = 1.0;
         private boolean enableHybridSearch = true;
         private int ragMilvusDim = 2048;
 
@@ -152,6 +153,8 @@ public class AppConfig {
         public void setRrfConstantK(int rrfConstantK) { this.rrfConstantK = rrfConstantK; }
         public double getSemanticWeight() { return semanticWeight; }
         public void setSemanticWeight(double semanticWeight) { this.semanticWeight = semanticWeight; }
+        public double getKeywordWeight() { return keywordWeight; }
+        public void setKeywordWeight(double keywordWeight) { this.keywordWeight = keywordWeight; }
         public boolean isEnableHybridSearch() { return enableHybridSearch; }
         public void setEnableHybridSearch(boolean enableHybridSearch) { this.enableHybridSearch = enableHybridSearch; }
         public int getRagMilvusDim() { return ragMilvusDim; }
@@ -163,14 +166,24 @@ public class AppConfig {
     }
 
     public static class RewriteConfig {
-        private boolean enabled = false;
-        /** 含原查询在内的目标改写条数 */
+        private boolean enabled = true;
+        /** Maximum number of queries, including the primary query. */
         private int numQueries = 3;
+        private double variantWeight = 0.8;
+        private double broadWeight = 0.6;
+        /** Number of concurrent expansion-query searches. */
+        private int parallelism = 2;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public int getNumQueries() { return numQueries; }
         public void setNumQueries(int numQueries) { this.numQueries = numQueries; }
+        public double getVariantWeight() { return variantWeight; }
+        public void setVariantWeight(double variantWeight) { this.variantWeight = variantWeight; }
+        public double getBroadWeight() { return broadWeight; }
+        public void setBroadWeight(double broadWeight) { this.broadWeight = broadWeight; }
+        public int getParallelism() { return parallelism; }
+        public void setParallelism(int parallelism) { this.parallelism = parallelism; }
     }
 
     public static class RerankConfig {

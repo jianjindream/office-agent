@@ -22,14 +22,12 @@ public class KGStore {
 
     private final Neo4jStore neo4j;
     private final int maxHops;
-    private final double kgWeight;
     private final Extractor extractor;
 
     public KGStore(AppConfig cfg, BiFunction<String, String, String> llmFn) {
         this.neo4j = new Neo4jStore(cfg);
         AppConfig.Neo4jConfig nc = cfg.getNeo4j();
         this.maxHops = nc != null && nc.getMaxHops() > 0 ? nc.getMaxHops() : 2;
-        this.kgWeight = nc != null && nc.getWeight() > 0 ? nc.getWeight() : 0.3;
         this.extractor = new Extractor(llmFn);
     }
 
@@ -158,7 +156,8 @@ public class KGStore {
                 List<String> seeds = rec.get("seeds").asList(Value::asString);
                 List<String> neighbors = rec.get("neighbors").asList(Value::asString);
                 long degree = rec.get("deg").asLong(0);
-                double score = (seeds.size() * 0.6 + degree * 0.01) * kgWeight;
+                // This score orders graph hits only. Cross-source weighting happens in HybridStore.
+                double score = seeds.size() * 0.6 + degree * 0.01;
                 results.add(new GraphSearchResult(cid, score, seeds, neighbors));
             }
         } catch (Exception e) {
@@ -188,7 +187,7 @@ public class KGStore {
                 seen.add(cid);
                 List<String> ents = new ArrayList<>();
                 ents.add(name);
-                results.add(new GraphSearchResult(cid, kgWeight, ents, new ArrayList<>()));
+                results.add(new GraphSearchResult(cid, 1.0, ents, new ArrayList<>()));
             }
         } catch (Exception e) {
             log.warn("Neo4j searchDirect 失败: {}", e.getMessage());

@@ -1,7 +1,9 @@
 package com.jianjin.assistant.domain.rag;
 
-import java.util.List;
-
 public interface Rewriter {
-    List<String> rewrite(String query, List<HistoryMessage> history);
+    /** Produces the one query used for the first retrieval pass. */
+    QuerySpec rewritePrimary(String query, java.util.List<HistoryMessage> history);
+
+    /** Produces optional expansion queries after the first retrieval pass is insufficient. */
+    java.util.List<QuerySpec> expand(String primaryQuery, java.util.List<HistoryMessage> history);
 }
