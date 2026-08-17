@@ -17,6 +17,7 @@ public class AppConfig {
     private ElasticsearchConfig elasticsearch = new ElasticsearchConfig();
     private KafkaConfig kafka = new KafkaConfig();
     private RagConfig rag = new RagConfig();
+    private EvaluationConfig evaluation = new EvaluationConfig();
     private MemoryConfig memory = new MemoryConfig();
     private HarnessConfig harness = new HarnessConfig();
     private SearchConfig search = new SearchConfig();
@@ -197,6 +198,14 @@ public class AppConfig {
         public void setPreviewLen(int previewLen) { this.previewLen = previewLen; }
     }
 
+    /** Offline RAG benchmark limits. */
+    public static class EvaluationConfig {
+        private int maxCases = 200;
+
+        public int getMaxCases() { return maxCases; }
+        public void setMaxCases(int maxCases) { this.maxCases = maxCases; }
+    }
+
     public static class MemoryConfig {
         private int shortTermMaxTurns = 5;
         private int longTermTopK = 3;
@@ -357,6 +366,8 @@ public class AppConfig {
     public void setKafka(KafkaConfig kafka) { this.kafka = kafka; }
     public RagConfig getRag() { return rag; }
     public void setRag(RagConfig rag) { this.rag = rag; }
+    public EvaluationConfig getEvaluation() { return evaluation; }
+    public void setEvaluation(EvaluationConfig evaluation) { this.evaluation = evaluation; }
     public MemoryConfig getMemory() { return memory; }
     public void setMemory(MemoryConfig memory) { this.memory = memory; }
     public HarnessConfig getHarness() { return harness; }

@@ -95,6 +95,21 @@ class RewriterRerankerTest {
     }
 
     @Test
+    void rerankerPreservesStableContextMetadata() {
+        Reranker r = new LLMReranker(
+                (sp, um) -> "{\"scores\":[{\"idx\":0,\"score\":1},{\"idx\":1,\"score\":10}]}", 200);
+        List<ScoredChunk> in = List.of(
+                new ScoredChunk(101L, new Chunk(1, "one"), 0.5, "hybrid", 2, false),
+                new ScoredChunk(202L, new Chunk(2, "two"), 0.4, "hybrid", 1, false));
+
+        List<ScoredChunk> out = r.rerank("query", in, 2);
+
+        assertEquals(202L, out.get(0).contextId);
+        assertEquals("hybrid", out.get(0).source);
+        assertEquals(1, out.get(0).sourceSupportCount);
+    }
+
+    @Test
     void rerankerFallsBackOnInvalidJson() {
         Reranker r = new LLMReranker((sp, um) -> "garbage", 200);
         List<ScoredChunk> in = sample(5);

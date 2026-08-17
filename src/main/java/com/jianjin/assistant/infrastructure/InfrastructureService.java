@@ -193,11 +193,28 @@ public class InfrastructureService {
         public long childId; public long contextId; public String content;
     }
 
+    public static class RagParentContextRow {
+        public long contextId; public String docHash; public int parentIdx; public String content;
+    }
+
     public List<RagContextRow> loadRAGContextsByChildIDs(List<Long> childIds) {
         List<RagContextRow> out = new ArrayList<>();
         for (RagChunkRepository.ContextRow r : ragChunkRepo.loadContextsByChildIds(childIds)) {
             RagContextRow row = new RagContextRow();
             row.childId = r.childId; row.contextId = r.contextId; row.content = r.content;
+            out.add(row);
+        }
+        return out;
+    }
+
+    public List<RagParentContextRow> loadAllRAGParentContexts() {
+        List<RagParentContextRow> out = new ArrayList<>();
+        for (RagChunkRepository.ParentRow r : ragChunkRepo.loadAllParents()) {
+            RagParentContextRow row = new RagParentContextRow();
+            row.contextId = r.id;
+            row.docHash = r.docHash;
+            row.parentIdx = r.parentIdx;
+            row.content = r.content;
             out.add(row);
         }
         return out;

@@ -355,6 +355,45 @@ sequenceDiagram
 
 ## 快速开始
 
+## RAG 离线评测
+
+评测以父级 context ID 为黄金标签，复用线上 Query Rewrite、Hybrid/RRF、Rerank 与生成链路。先创建版本化黄金集，再触发运行：
+
+先调用 `GET /api/rag/evaluations/contexts` 获取可标注的父级 `contextId`；不要使用上传接口返回的临时 child chunk 序号。
+
+```http
+POST /api/rag/evaluations/datasets
+Content-Type: application/json
+
+{
+  "name": "office-policy",
+  "version": "v1",
+  "description": "办公制度基准集",
+  "cases": [{
+    "caseId": "expense-001",
+    "question": "上海出差住宿报销上限是多少？",
+    "referenceAnswer": "上海属于一类地区，住宿费上限为每人每天 600 元。",
+    "relevantContextIds": [101, 102],
+    "category": "差旅",
+    "difficulty": "normal"
+  }]
+}
+```
+
+```http
+POST /api/rag/evaluations/runs
+Content-Type: application/json
+
+{
+  "datasetName": "office-policy",
+  "datasetVersion": "v1",
+  "topKs": [1, 3, 5, 10],
+  "generationEvaluation": true
+}
+```
+
+运行报告包含 `retrievalMetrics`、`rerankMetrics`、`contextMetrics`、`generationMetrics` 和逐题 `caseResults`。可通过 `GET /api/rag/evaluations/runs/{runId}` 查询完整报告，或通过 `GET /api/rag/evaluations/runs?datasetName=office-policy&datasetVersion=v1` 查看历史摘要。未配置真实 LLM 时，Faithfulness 与 Answer Relevance 会跳过；PostgreSQL 不可用时，当前请求仍会返回报告，但不会保存历史。
+
 ### 本地运行
 
 ```bash

@@ -120,8 +120,26 @@ public class RagService {
     }
 
     public QueryResult queryWithHistory(String question, List<HistoryMessage> history) {
+        QueryTrace trace = traceQueryWithHistory(question, history);
+        return new QueryResult(trace.answer, trace.finalContexts);
+    }
+
+    /**
+     * Runs the same production RAG pipeline as {@link #queryWithHistory}, but retains
+     * stable parent-context IDs and every ranking stage for offline evaluation.
+     */
+    public QueryTrace traceQuery(String question) {
+        return traceQueryWithHistory(question, null);
+    }
+
+    public QueryTrace traceQueryWithHistory(String question, List<HistoryMessage> history) {
+        QueryTrace trace = new QueryTrace();
+        trace.originalQuestion = question;
+        trace.mode = store.getMode();
         if (!loaded) {
-            return new QueryResult("知识库为空，请先上传文档。", Collections.emptyList());
+            trace.answer = "知识库为空，请先上传文档。";
+            trace.warning = "knowledge_base_empty";
+            return trace;
         }
 
         List<HistoryMessage> safeHistory = history == null ? Collections.emptyList() : history;
@@ -129,14 +147,17 @@ public class RagService {
                 ? new QuerySpec(question, QueryType.PRIMARY)
                 : rewriter.rewritePrimary(question, safeHistory);
         if (primary.text().isBlank()) primary = new QuerySpec(question, QueryType.PRIMARY);
+        trace.primaryQuery = primary.text();
 
         // Fetch extra parent contexts only when reranking is enabled.
         int fetchK = reranker != null ? Math.max(cfg.getRag().getTopK() * 4, 10) : cfg.getRag().getTopK();
         List<HybridStore.SearchResult> primaryHits = store.search(primary.text(), fetchK);
         List<ScoredChunk> results = toScored(primaryHits);
+        trace.primaryRetrievalCandidates = copy(results);
         if (shouldExpand(primaryHits) && rewriter != null) {
             List<QuerySpec> variants = rewriter.expand(primary.text(), safeHistory);
             if (variants != null && !variants.isEmpty()) {
+                for (QuerySpec variant : variants) trace.expandedQueries.add(variant.text());
                 results = mergePrimaryAndVariants(primary, primaryHits, variants, fetchK);
             }
         }
@@ -144,10 +165,15 @@ public class RagService {
         // unavailable 模式：兜底 TF
         if (results.isEmpty() && "unavailable".equals(store.getMode())) {
             results = tfSearch(question, cfg.getRag().getTopK());
+            trace.fallbackUsed = true;
         }
         if (results.isEmpty()) {
-            return new QueryResult("知识库中未找到相关内容。", Collections.emptyList());
+            trace.answer = "知识库中未找到相关内容。";
+            trace.warning = "no_retrieval_results";
+            return trace;
         }
+
+        trace.retrievalCandidates = copy(results);
 
         // 3) Rerank
         if (reranker != null) {
@@ -155,6 +181,8 @@ public class RagService {
         } else if (results.size() > cfg.getRag().getTopK()) {
             results = new ArrayList<>(results.subList(0, cfg.getRag().getTopK()));
         }
+        trace.rerankedContexts = copy(results);
+        trace.finalContexts = copy(results);
 
         String context = results.stream()
                 .map(r -> r.chunk.getContent())
@@ -168,7 +196,9 @@ public class RagService {
         } else {
             answer = "【知识库检索结果】\n" + context;
         }
-        return new QueryResult(answer, results);
+        trace.answer = answer;
+        trace.mode = store.getMode();
+        return trace;
     }
 
     public List<ScoredChunk> searchMulti(List<String> queries, int topK) {
@@ -231,7 +261,7 @@ public class RagService {
                 HybridStore.SearchResult hit = query.hits.get(i);
                 if (hit == null || hit.chunk == null) continue;
                 FusedContext context = rrf.computeIfAbsent(hit.contextId,
-                        ignored -> new FusedContext(hit.chunk));
+                        ignored -> new FusedContext(hit.contextId, hit.chunk, "query-rrf", hit.sourceSupportCount));
                 context.score += weight / (k + i + 1);
             }
         }
@@ -241,7 +271,9 @@ public class RagService {
         sorted.sort((left, right) -> Double.compare(right.getValue().score, left.getValue().score));
         List<ScoredChunk> out = new ArrayList<>();
         for (Map.Entry<Long, FusedContext> item : sorted) {
-            out.add(new ScoredChunk(item.getValue().chunk, item.getValue().score / totalWeight));
+            FusedContext context = item.getValue();
+            out.add(new ScoredChunk(context.contextId, context.chunk, context.score / totalWeight,
+                    context.source, context.sourceSupportCount, false));
             if (out.size() == topK) break;
         }
         return out;
@@ -260,18 +292,26 @@ public class RagService {
     private List<ScoredChunk> toScored(List<HybridStore.SearchResult> hits) {
         List<ScoredChunk> out = new ArrayList<>();
         if (hits == null) return out;
-        for (HybridStore.SearchResult r : hits) out.add(new ScoredChunk(r.chunk, r.score));
+        for (HybridStore.SearchResult r : hits) {
+            out.add(new ScoredChunk(r.contextId, r.chunk, r.score, r.source, r.sourceSupportCount, false));
+        }
         return out;
     }
 
     private record QueryHits(QuerySpec spec, List<HybridStore.SearchResult> hits) {}
 
     private static class FusedContext {
+        private final long contextId;
         private final Chunk chunk;
+        private final String source;
+        private final int sourceSupportCount;
         private double score;
 
-        private FusedContext(Chunk chunk) {
+        private FusedContext(long contextId, Chunk chunk, String source, int sourceSupportCount) {
+            this.contextId = contextId;
             this.chunk = chunk;
+            this.source = source;
+            this.sourceSupportCount = sourceSupportCount;
         }
     }
 
@@ -282,6 +322,15 @@ public class RagService {
             chunks.add(new Chunk(i, rows.get(i).content));
         }
         return chunks;
+    }
+
+    /** Stable parent IDs intended for building RAG evaluation golden datasets. */
+    public List<ContextCatalogItem> getEvaluationContexts() {
+        List<ContextCatalogItem> out = new ArrayList<>();
+        for (InfrastructureService.RagParentContextRow row : infra.loadAllRAGParentContexts()) {
+            out.add(new ContextCatalogItem(row.contextId, row.docHash, row.parentIdx, row.content));
+        }
+        return out;
     }
 
     public void restoreChunks(List<Chunk> chunks) {
@@ -295,7 +344,7 @@ public class RagService {
         List<InfrastructureService.ChunkRow> rows = infra.loadAllRAGChunks();
         if (rows.isEmpty()) return Collections.emptyList();
         List<Chunk> chunks = new ArrayList<>();
-        for (int i = 0; i < rows.size(); i++) chunks.add(new Chunk(i, rows.get(i).content));
+        for (int i = 0; i < rows.size(); i++) chunks.add(new Chunk((int) rows.get(i).id, rows.get(i).content));
 
         Set<String> allTokens = new LinkedHashSet<>();
         List<String> queryTokens = LongTermMemory.tokenize(query);
@@ -319,10 +368,33 @@ public class RagService {
                 if (idx != null) cVec[idx]++;
             }
             double sim = cosine(qVec, cVec);
-            if (sim > 0) scored.add(new ScoredChunk(c, sim));
+            if (sim > 0) scored.add(new ScoredChunk(c.getId(), c, sim, "tf-fallback", 1, true));
         }
         scored.sort((a, b) -> Double.compare(b.score, a.score));
-        return scored.subList(0, Math.min(topK, scored.size()));
+        int fetchK = Math.min(scored.size(), Math.max(topK * 4, 10));
+        List<Long> childIds = new ArrayList<>();
+        for (int i = 0; i < fetchK; i++) childIds.add(scored.get(i).contextId);
+        Map<Long, InfrastructureService.RagContextRow> contextsByChild = new HashMap<>();
+        for (InfrastructureService.RagContextRow row : infra.loadRAGContextsByChildIDs(childIds)) {
+            contextsByChild.put(row.childId, row);
+        }
+        Map<Long, ScoredChunk> parents = new LinkedHashMap<>();
+        for (int i = 0; i < fetchK; i++) {
+            ScoredChunk child = scored.get(i);
+            InfrastructureService.RagContextRow row = contextsByChild.get(child.contextId);
+            if (row == null || row.content == null) {
+                parents.putIfAbsent(child.contextId, child);
+                continue;
+            }
+            ScoredChunk current = parents.get(row.contextId);
+            if (current == null || child.score > current.score) {
+                parents.put(row.contextId, new ScoredChunk(row.contextId, new Chunk(0, row.content), child.score,
+                        "tf-fallback", 1, true));
+            }
+        }
+        List<ScoredChunk> contexts = new ArrayList<>(parents.values());
+        contexts.sort((a, b) -> Double.compare(b.score, a.score));
+        return contexts.subList(0, Math.min(topK, contexts.size()));
     }
 
     private double cosine(double[] a, double[] b) {
@@ -337,9 +409,32 @@ public class RagService {
     // ============ Result types ============
 
     public static class ScoredChunk {
+        /** Stable PostgreSQL parent-context ID used by the evaluator. */
+        public long contextId;
         public Chunk chunk;
         public double score;
-        public ScoredChunk(Chunk chunk, double score) { this.chunk = chunk; this.score = score; }
+        public String source;
+        public int sourceSupportCount;
+        public boolean fallback;
+
+        /** Legacy constructor retained for existing callers and tests. */
+        public ScoredChunk(Chunk chunk, double score) {
+            this(chunk == null ? -1 : chunk.getId(), chunk, score, "unknown", 0, false);
+        }
+
+        public ScoredChunk(long contextId, Chunk chunk, double score, String source,
+                           int sourceSupportCount, boolean fallback) {
+            this.contextId = contextId;
+            this.chunk = chunk;
+            this.score = score;
+            this.source = source;
+            this.sourceSupportCount = sourceSupportCount;
+            this.fallback = fallback;
+        }
+
+        public ScoredChunk withScore(double newScore) {
+            return new ScoredChunk(contextId, chunk, newScore, source, sourceSupportCount, fallback);
+        }
     }
 
     public static class QueryResult {
@@ -348,5 +443,43 @@ public class RagService {
         public QueryResult(String answer, List<ScoredChunk> results) {
             this.answer = answer; this.results = results;
         }
+    }
+
+    public static class QueryTrace {
+        public String originalQuestion;
+        public String primaryQuery;
+        public List<String> expandedQueries = new ArrayList<>();
+        /** First-pass hybrid retrieval before any multi-query RRF fusion. */
+        public List<ScoredChunk> primaryRetrievalCandidates = new ArrayList<>();
+        public List<ScoredChunk> retrievalCandidates = new ArrayList<>();
+        public List<ScoredChunk> rerankedContexts = new ArrayList<>();
+        public List<ScoredChunk> finalContexts = new ArrayList<>();
+        public String answer;
+        public String mode;
+        public boolean fallbackUsed;
+        public String warning;
+    }
+
+    public static class ContextCatalogItem {
+        public long contextId;
+        public String docHash;
+        public int parentIdx;
+        public String content;
+
+        public ContextCatalogItem(long contextId, String docHash, int parentIdx, String content) {
+            this.contextId = contextId;
+            this.docHash = docHash;
+            this.parentIdx = parentIdx;
+            this.content = content;
+        }
+    }
+
+    private static List<ScoredChunk> copy(List<ScoredChunk> source) {
+        List<ScoredChunk> out = new ArrayList<>();
+        if (source == null) return out;
+        for (ScoredChunk item : source) {
+            if (item != null) out.add(item.withScore(item.score));
+        }
+        return out;
     }
 }

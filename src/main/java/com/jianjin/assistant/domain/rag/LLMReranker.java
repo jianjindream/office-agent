@@ -88,7 +88,9 @@ public class LLMReranker implements Reranker {
 
         List<ScoredChunk> out = new ArrayList<>(pool.size());
         for (Scored p : pool) {
-            ScoredChunk reranked = new ScoredChunk(p.hr.chunk, p.llm >= 0 ? p.llm / 10.0 : p.hr.score);
+            // Keep the stable parent-context ID and source metadata so evaluation can
+            // compare retrieval and rerank stages without relying on chunk text.
+            ScoredChunk reranked = p.hr.withScore(p.llm >= 0 ? p.llm / 10.0 : p.hr.score);
             out.add(reranked);
         }
         return truncate(out, topK);

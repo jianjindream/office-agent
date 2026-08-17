@@ -53,6 +53,9 @@ app:
       variant-weight: 0.8
       broad-weight: 0.6
       parallelism: 2
+  evaluation:
+    # A synchronous benchmark run is capped to protect the serving process and LLM budget.
+    max-cases: 200
   memory:
     short-term-max-turns: 5
     long-term-top-k: 3

@@ -35,6 +35,13 @@ public class RagChunkRepository {
         public String content;
     }
 
+    public static class ParentRow {
+        public long id;
+        public String docHash;
+        public int parentIdx;
+        public String content;
+    }
+
     public long saveParent(String docHash, int parentIdx, String content) {
         Connection connection = pg.connection();
         if (connection == null) return -1;
@@ -123,6 +130,28 @@ public class RagChunkRepository {
                     context.content = result.getString("content");
                     contexts.add(context);
                 }
+            }
+        } catch (SQLException e) {
+            log.warn("RAG parent context load failed: {}", e.getMessage());
+        }
+        return contexts;
+    }
+
+    /** Stable parent contexts exposed for human golden-set labelling. */
+    public List<ParentRow> loadAllParents() {
+        List<ParentRow> contexts = new ArrayList<>();
+        Connection connection = pg.connection();
+        if (connection == null) return contexts;
+        try (Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery(
+                     "SELECT id, doc_hash, parent_idx, content FROM rag_parent_chunks ORDER BY doc_hash, parent_idx")) {
+            while (result.next()) {
+                ParentRow row = new ParentRow();
+                row.id = result.getLong("id");
+                row.docHash = result.getString("doc_hash");
+                row.parentIdx = result.getInt("parent_idx");
+                row.content = result.getString("content");
+                contexts.add(row);
             }
         } catch (SQLException e) {
             log.warn("RAG parent context load failed: {}", e.getMessage());

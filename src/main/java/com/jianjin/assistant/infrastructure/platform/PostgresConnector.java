@@ -71,7 +71,27 @@ public class PostgresConnector {
                     content TEXT NOT NULL, embedding JSONB, created_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(doc_hash, chunk_idx))""",
                 "ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS parent_id BIGINT",
-                "CREATE INDEX IF NOT EXISTS idx_rag_chunks_parent_id ON rag_chunks(parent_id)"
+                "CREATE INDEX IF NOT EXISTS idx_rag_chunks_parent_id ON rag_chunks(parent_id)",
+                """
+                CREATE TABLE IF NOT EXISTS rag_eval_datasets (
+                    id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL,
+                    description TEXT, created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(name, version))""",
+                """
+                CREATE TABLE IF NOT EXISTS rag_eval_cases (
+                    id BIGSERIAL PRIMARY KEY, dataset_id BIGINT NOT NULL REFERENCES rag_eval_datasets(id) ON DELETE CASCADE,
+                    case_id TEXT NOT NULL, case_json JSONB NOT NULL, created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(dataset_id, case_id))""",
+                """
+                CREATE TABLE IF NOT EXISTS rag_eval_runs (
+                    id UUID PRIMARY KEY, dataset_id BIGINT REFERENCES rag_eval_datasets(id), status TEXT NOT NULL,
+                    config_snapshot JSONB NOT NULL, report_json JSONB NOT NULL,
+                    started_at TIMESTAMP DEFAULT NOW(), completed_at TIMESTAMP)""",
+                """
+                CREATE TABLE IF NOT EXISTS rag_eval_case_results (
+                    id BIGSERIAL PRIMARY KEY, run_id UUID NOT NULL REFERENCES rag_eval_runs(id) ON DELETE CASCADE,
+                    case_id TEXT NOT NULL, result_json JSONB NOT NULL)""",
+                "CREATE INDEX IF NOT EXISTS idx_rag_eval_runs_dataset_id ON rag_eval_runs(dataset_id)"
         };
         try (Statement stmt = conn.createStatement()) {
             for (String ddl : ddls) stmt.execute(ddl);
