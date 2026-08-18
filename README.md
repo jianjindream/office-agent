@@ -1,428 +1,341 @@
+# DreamLoop Office Agent
 
-# dreamloop-office-agent：多模态办公智能体系统
+一个基于 Java 17 与 Spring Boot 3 的办公智能体实验项目。它把多轮对话、RAG 知识库、三层记忆、工具调用、ReAct 多步执行、知识图谱和离线评测整合到同一个 Web 应用中，并提供开箱即用的单页界面与 HTTP API。
 
-dreamloop-office-agent 是一个多模态办公智能体系统，融合了检索增强生成（RAG）、三层记忆、知识图谱、沙箱执行与可恢复执行流，支持多轮对话、知识检索、工具调用与复杂推理。系统具备高可用性、可扩展性与工程落地能力。
+> 当前项目适合本地开发、能力验证和架构研究。默认配置允许在没有 API Key、数据库或检索中间件的情况下启动；此时模型与部分能力会使用 Mock 或内存实现。
 
-## 项目特性
+## 主要能力
 
-- **多阶段智能体核心**：支持纯对话、RAG 检索、单工具调用、多工具编排（ReAct）等多种智能体模式，自动路由。
-- **RAG 检索增强生成**：融合 Milvus 语义向量、Elasticsearch 关键词、Neo4j 知识图谱，三路 RRF 融合排序，自动降级，支持文档分块与异步实体关系抽取。
-- **三层记忆系统**：短期记忆（滑动窗口）、长期记忆（Embedding/TF）、用户偏好（LLM+规则），支持去重、合并、衰减、过期淘汰。
-- **图增强记忆**：长期记忆叠加 Neo4j 图层，支持 FOLLOWS、SIMILAR_TO、CAUSES、BELONGS_TO 等关系，提升历史联想与推理能力。
-- **工具链与可恢复执行**：内置时间、天气、搜索、RAG 检索、命令执行等工具，支持 ReAct 规划-执行-生成流程，任务快照与重试机制保障稳定性。
-- **沙箱执行**：支持 Docker / Local / Mock 三种沙箱后端，资源限制（CPU/内存/PID/网络），命令白名单安全校验。
-- **高可用基础设施**：PostgreSQL 持久化、Milvus/ES/Neo4j/Kafka 可选，自动优雅降级，适配多种部署环境。
+- **统一对话入口**：自动在普通对话、RAG、单工具和 ReAct 多工具模式之间路由。
+- **流式执行**：通过 SSE 逐步返回规划、工具调用、观察结果和最终答案，并支持取消任务。
+- **混合 RAG**：组合 Milvus 向量检索、Elasticsearch 关键词检索和 Neo4j 图检索，使用加权 RRF 融合；支持 Query Rewrite、小块召回/大块生成和可选 LLM Rerank。
+- **文档知识库**：支持直接写入文本，以及上传 PDF、TXT、Markdown 文件；文档可同步进入 RAG 索引。
+- **分层记忆**：按 `user_id` 与 `session_id` 隔离短期记忆、长期记忆、用户偏好和会话摘要。
+- **工具系统**：内置时间、模拟天气、Web 搜索、知识库检索和沙箱命令工具，并可在运行时注册 HTTP MCP 工具。
+- **可靠执行**：包含执行计划、步骤重试、超时、快照和中断机制。
+- **RAG 离线评测**：支持版本化黄金数据集，以及 Recall、MRR、NDCG、上下文质量和生成质量评测。
+- **可选基础设施**：PostgreSQL、Milvus、Elasticsearch、Neo4j 和 Kafka 不可用时，应用会尽量降级运行。
 
----
-
-
-## 整体架构图
-
-```mermaid
-graph TB
-    subgraph Frontend["前端 (index.html)"]
-        CHAT["对话区"]
-        SIDEBAR["侧边栏<br/>知识库上传 / 近期对话"]
-        CTRL["控制栏<br/>知识库开关 / 工具选择"]
-    end
-
-    subgraph Router["智能路由层"]
-        R["Router"]
-    end
-
-    subgraph Core["核心能力"]
-        CHAT_ENGINE["Stage 1: 多轮对话<br/>LLM + STM 历史注入"]
-        RAG_ENGINE["Stage 2: RAG<br/>Milvus + ES + Neo4j 三路检索 → RRF融合 → LLM合成"]
-        TOOL_ENGINE["Stage 3: 工具调用<br/>time / weather / search / exec_command"]
-        REACT_ENGINE["Stage 4: ReAct<br/>Planner → Executor → Generator"]
-    end
-
-    subgraph Memory["Stage 5: 三层记忆"]
-        STM["短期记忆<br/>滑动窗口"]
-        LTM["长期记忆<br/>Embedding语义 + Neo4j图关系"]
-        PREF["用户偏好<br/>LLM NER提取"]
-    end
-
-    subgraph Harness["Stage 6: 稳定执行"]
-        RETRY["重试机制"]
-        SNAP["快照恢复"]
-    end
-
-    subgraph Sandbox["沙箱执行"]
-        DOCKER["Docker 后端<br/>资源隔离 + 安全限制"]
-        LOCAL["Local 后端"]
-        MOCK["Mock 后端"]
-    end
-
-    subgraph Infra["基础设施 (全部可选, 优雅降级)"]
-        PG["PostgreSQL<br/>偏好/LTM/RAG Chunk持久化"]
-        MIL["Milvus<br/>语义向量近邻搜索"]
-        ES["Elasticsearch<br/>BM25全文检索"]
-        NEO["Neo4j<br/>知识图谱 + 图增强记忆"]
-        KAFKA["Kafka<br/>事件流"]
-    end
-
-    CHAT --> R
-    CTRL --> R
-
-    R -->|纯对话| CHAT_ENGINE
-    R -->|知识检索| RAG_ENGINE
-    R -->|单工具| TOOL_ENGINE
-    R -->|多工具编排| REACT_ENGINE
-
-    CHAT_ENGINE --> Memory
-    RAG_ENGINE --> Memory
-    TOOL_ENGINE --> Memory
-    REACT_ENGINE --> Memory
-    REACT_ENGINE --> Harness
-
-    TOOL_ENGINE --> Sandbox
-    REACT_ENGINE --> Sandbox
-    Sandbox --> DOCKER
-    Sandbox --> LOCAL
-    Sandbox --> MOCK
-
-    RETRY --> SNAP
-    SNAP --> PG
-
-    STM -.->|多轮历史| CHAT_ENGINE
-    LTM -.->|跨会话恢复| CHAT_ENGINE
-    PREF -.->|个性化上下文| CHAT_ENGINE
-
-    LTM --> PG
-    LTM --> NEO
-    PREF --> PG
-    RAG_ENGINE --> MIL
-    RAG_ENGINE --> ES
-    RAG_ENGINE --> NEO
-    CHAT_ENGINE --> KAFKA
-
-    SIDEBAR -->|上传文档| RAG_ENGINE
-```
-
-
-## 核心流程时序图
+## 系统架构
 
 ```mermaid
-sequenceDiagram
-    actor User
-    participant FE as 前端
-    participant Router as 智能路由
-    participant LLM as LLM API
-    participant Planner as Planner LLM
-    participant Executor as Executor
-    participant Tool as Tool / RAG / Sandbox
-    participant Generator as Generator LLM
-    participant Memory as 三层记忆
-    participant DB as PostgreSQL
+flowchart LR
+    UI[Web UI / HTTP API] --> APP[ChatApplicationService]
+    APP --> ROUTER[ChatRouter]
+    ROUTER --> CHAT[普通对话]
+    ROUTER --> RAG[RAG 检索]
+    ROUTER --> TOOL[单工具调用]
+    ROUTER --> REACT[Planner + ReAct Loop]
 
-    User->>FE: 输入消息 + 选择工具
-    FE->>Router: POST /api/chat {message, tools}
+    CHAT --> LLM[LLM Service]
+    RAG --> LLM
+    REACT --> LLM
+    TOOL --> TOOLS[内置工具 / MCP / Sandbox]
+    REACT --> TOOLS
 
-    alt 纯对话 (无工具)
-        Router->>Memory: 加载 STM 历史 + LTM + 偏好
-        Memory-->>Router: 上下文消息列表
-        Router->>LLM: Chat(systemPrompt + 历史 + 当前消息)
-        LLM-->>Router: 自然语言回答
-        Router->>Memory: 异步提取偏好 + 存储长期记忆
-
-    else 工具编排 (ReAct)
-        Router->>Planner: 分析query + 工具列表 → 执行计划
-        Planner-->>Router: [{tool, params, reason}, ...]
-
-        loop 按计划逐步执行
-            Router->>Executor: 执行 tool(params)
-            Executor->>Tool: 调用具体工具
-            Tool-->>Executor: 观察结果
-            Executor-->>Router: 步骤结果 (思考 → 动作 → 观察)
-            Router->>DB: 保存快照
-        end
-
-        Router->>Generator: 合成所有观察 → 最终答案
-        Generator-->>Router: 自然语言回答
-        Router->>Memory: 异步存储长期记忆 + 提取偏好
-    end
-
-    Router-->>FE: {answer, steps, memories}
-    FE-->>User: 渲染回答 + 思考过程
+    APP <--> MEMORY[短期记忆 / 长期记忆 / 偏好 / 摘要]
+    RAG <--> SEARCH[Milvus / Elasticsearch / Neo4j]
+    MEMORY <--> STORE[PostgreSQL / Neo4j]
+    APP --> EVENTS[Kafka Event Bus]
 ```
 
+一次请求的核心链路是：上下文组装 → 模式路由 → 检索或工具执行 → LLM 生成 → 记忆写入与快照保存。外部组件由基础设施层统一连接，连接失败不会阻止应用进入基础模式。
 
-## RAG 三路混合检索流程图
+## 技术栈
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant RAG as RAG Engine
-    participant EMB as Embedding API
-    participant MIL as Milvus
-    participant ES as Elasticsearch
-    participant NEO as Neo4j
-    participant PG as PostgreSQL
-    participant LLM as LLM API
-
-    User->>RAG: 查询: "量子计算的应用领域"
-    RAG->>EMB: Embed(query)
-    EMB-->>RAG: query向量 [0.12, -0.34, ...]
-
-    par 三路并行检索
-        RAG->>MIL: MilvusSearch(query向量, topK)
-        MIL-->>RAG: 语义结果 [{pg_id, distance}, ...]
-        RAG->>ES: BM25Search(query, topK)
-        ES-->>RAG: 关键词结果 [{pg_id, score}, ...]
-        RAG->>NEO: GraphSearch(实体, maxHops=2)
-        NEO-->>RAG: 图谱结果 [{pg_id, weight}, ...]
-    end
-
-    RAG->>RAG: RRF融合排序<br/>score = Σ(1/(k+rank_i)) × weight_i<br/>语义0.7 + BM25权重 + 图0.3
-
-    RAG->>PG: LoadRAGChunksByIDs(top_pg_ids)
-    PG-->>RAG: [{id, content}, ...]
-
-    RAG->>LLM: Chat(系统提示 + 检索上下文 + 用户问题)
-    LLM-->>RAG: 基于知识的回答
-
-    RAG-->>User: 回答 + 引用来源
-```
-
-
-## 记忆系统详细流程图
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant Agent as Agent
-    participant STM as 短期记忆<br/>(滑动窗口 N×2)
-    participant LLM as LLM API
-    participant EMB as Embedding API
-    participant LTM as 长期记忆<br/>(Embedding+TF双层)
-    participant GRAPH as Neo4j图增强
-    participant PREF as 用户偏好<br/>(LLM NER+规则双重)
-    participant PG as PostgreSQL
-
-    Note over User,PG: ═══════════ 服务启动: 跨会话恢复 ═══════════
-    Agent->>PG: LoadPreferences(userID)
-    PG-->>Agent: 历史偏好 [{key, value}, ...]
-    Agent->>PREF: SaveBatch(恢复偏好到内存)
-    Agent->>PG: LoadLongTermItems()
-    PG-->>Agent: 历史LTM [{id, content, embedding, importance}, ...]
-    Agent->>LTM: StoreItem(逐条恢复到内存索引)
-    Note right of LTM: 重建TF词表<br/>恢复Embedding向量
-    Agent->>GRAPH: 重建记忆节点与关系
-    Agent->>STM: 初始化空窗口
-
-    Note over User,PG: ═══════════ 每轮对话: 读取阶段 ═══════════
-    User->>Agent: "你好，我叫小明，我喜欢打篮球"
-    Agent->>STM: Add(user, 消息)
-
-    Agent->>LTM: Recall(query, topK=3, queryEmbedding?)
-    alt Embedding API 可用
-        Agent->>EMB: Embed(query)
-        EMB-->>LTM: query向量
-        loop 遍历所有LTM条目
-            LTM->>LTM: cosine(queryEmb, itemEmb)
-            LTM->>LTM: score = sim×0.7 + importance×0.3
-            alt score ≥ 0.4 阈值
-                LTM->>LTM: 更新item.LastAccessed
-                LTM->>LTM: 加入候选集
-            else score < 0.4
-                Note right of LTM: 过滤噪声，不注入
-            end
-        end
-    else 降级: TF词袋
-        LTM->>LTM: buildVocab(query) 扩充词表
-        LTM->>LTM: textToVector(query) → TF向量
-        loop 遍历所有LTM条目
-            LTM->>LTM: cosine(queryTF, itemTF)
-            LTM->>LTM: score = sim×0.7 + importance×0.3
-        end
-    end
-    LTM-->>Agent: 召回记忆 [{content, score}, ...]
-
-    Agent->>GRAPH: GraphRecall(相关节点, maxHops=2)
-    GRAPH-->>Agent: 图扩展记忆 [关联历史, ...]
-
-    Agent->>PREF: BuildContext()
-    PREF-->>Agent: "【用户偏好】\n姓名: 小明\n喜好: 篮球"
-
-    Agent->>LLM: Chat(systemPrompt + 偏好 + LTM记忆 + 图记忆 + STM历史 + 当前消息)
-    LLM-->>Agent: "你好小明！喜欢篮球很棒..."
-
-    Note over User,PG: ═══════════ 每轮对话: 写入阶段 ═══════════
-    Agent->>STM: Add(assistant, 回答内容)
-
-    Agent->>LTM: Store(用户消息, importance, embedding?)
-    alt Embedding API 可用
-        Agent->>EMB: Embed(消息内容)
-        EMB-->>LTM: 语义向量
-        loop 去重检测: vs 每条已有条目
-            LTM->>LTM: cosine(newEmb, itemEmb)
-            alt sim ≥ 0.95 (去重阈值)
-                LTM->>LTM: 更新已有条目重要性+访问时间
-            else sim < 0.95
-                LTM->>LTM: 新增条目
-            end
-        end
-        LTM->>PG: SaveLongTermItem(content, vector, importance)
-    else 降级: TF词袋
-        LTM->>LTM: buildVocab + textToVector
-        LTM->>PG: SaveLongTermItem(content, nil, importance)
-    end
-
-    Agent->>GRAPH: 新增记忆节点 + 关系<br/>(FOLLOWS/SIMILAR_TO/CAUSES)
-
-    par 异步: LLM NER偏好提取
-        Agent->>LLM: "从以下对话提取用户偏好: ..."
-        LLM-->>Agent: {"姓名":"小明","喜好":"篮球"}
-        Agent->>PREF: SaveBatch(kvs)
-        PREF->>PG: SavePreference(key, value)
-    and 同步: 规则兜底 (立即生效)
-        Agent->>PREF: ExtractAndSave("我喜欢打篮球")
-        PREF-->>Agent: key="喜好", value="打篮球", ok=true
-        PREF->>PG: SavePreference(key, value)
-    end
-
-    Note over User,PG: ═══════════ 合并触发: 每5条新记忆 ═══════════
-    LTM->>LTM: NeedConsolidation()?
-    alt storeCount ≥ TriggerInterval(5)
-        Note over LTM: Phase 1: 重要性衰减
-        LTM->>LTM: importance × DecayRate^days<br/>(每日×0.995, 30天≈0.86)
-        Note over LTM: Phase 2: 去重 + 合并
-        loop 两两比较相似度
-            alt sim ≥ 0.95 (DedupThreshold)
-                LTM->>LTM: 保留importance更高的, 删除另一条
-                LTM->>PG: DELETE removed IDs
-                LTM->>GRAPH: 删除对应图节点
-            else sim ≥ 0.80 (SimilarityThreshold)
-                LTM->>LTM: mergeItems(): 内容拼接/保留较长
-                LTM->>PG: UPDATE merged item, DELETE被合并条目
-                LTM->>GRAPH: 合并图关系, 保护高中心度节点
-            end
-        end
-        Note over LTM: Phase 3: 过期淘汰
-        loop 检查每条记忆
-            alt days > TTL(30) AND importance < Min(0.3)
-                LTM->>LTM: 删除过期条目
-                LTM->>PG: DELETE expired IDs
-            end
-        end
-        LTM->>LTM: rebuildVocab() 重建词表
-    end
-
-    Note over User,PG: ═══════════ 会话结束 ═══════════
-    Note right of STM: 进程消亡, STM清除<br/>不持久化（设计如此）
-    Note right of LTM: 已实时持久化到PG<br/>Consolidation结果已同步
-    Note right of GRAPH: 图关系已持久化到Neo4j<br/>下次启动恢复
-    Note right of PREF: 已实时持久化到PG<br/>下次启动LoadPreferences恢复
-```
-
-
-## 技术实现亮点
-
-- **RAG 检索增强**：
-    - 支持三路混合检索（Milvus 语义向量、ES BM25 关键词、Neo4j 知识图谱），RRF 融合排序。
-    - 一级加权 RRF 默认权重为 Milvus 0.7、ES 1.0、Neo4j 0.3；图分仅用于 Neo4j 内部排序。
-    - 查询改写默认启用：先检索一条自包含主 query，仅在结果不足或缺少跨路共识时扩展变体，并以二级加权 RRF 合并。
-    - 文本分块采用窗口重叠，提升召回覆盖率。
-    - 检索模式自动切换，单路故障自动降级，支持企业级高可用。
-    - 检索结果结构化，便于 LLM 合成与追溯。
-
-- **三层记忆系统**：
-    - 短期记忆：滑动窗口保存最近 N 轮对话。
-    - 长期记忆：Embedding/TF 双层，支持去重、合并、衰减、过期淘汰。
-    - 偏好记忆：LLM+规则自动提取用户偏好，持久化跨会话恢复。
-
-- **图增强记忆**：
-    - 记忆写入时自动建立时序（FOLLOWS）、相似（SIMILAR_TO）等关系。
-    - 支持图扩展召回，发现间接关联历史记忆。
-    - 合并淘汰时保护高中心度节点，防止核心知识丢失。
-
-- **智能体与工具链**：
-    - 路由优先级：ReAct 复合推理 > 单工具 > RAG 检索 > 纯对话。
-    - 工具链支持自定义扩展，RAG 检索作为知识库工具无缝集成。
-    - ReAct 规划-执行-生成流程，任务快照与重试机制保障稳定性。
-
-- **沙箱执行**：
-    - 支持 Docker（资源隔离 + 安全限制）、Local（直接执行）、Mock（测试）三种后端。
-    - 命令长度限制、白名单校验、资源配额（CPU/内存/PID/网络/只读文件系统）。
-
-- **工程与基础设施**：
-    - PostgreSQL 持久化所有关键数据。
-    - Milvus/ES/Neo4j/Kafka 可选，自动降级，适配多种部署环境。
-    - 前后端解耦，支持多端接入。
-
----
+| 类别 | 技术 |
+| --- | --- |
+| 后端 | Java 17、Spring Boot 3.2、Maven |
+| 前端 | 原生 HTML / CSS / JavaScript |
+| 模型接口 | 火山引擎 Ark 兼容的 Chat Completions 与 Embeddings API |
+| 数据持久化 | PostgreSQL 16 |
+| 检索 | Milvus、Elasticsearch、Neo4j、加权 RRF |
+| 事件 | Kafka（KRaft） |
+| 文档解析 | Apache PDFBox |
+| 测试 | JUnit 5、Spring Boot Test |
 
 ## 快速开始
 
-## RAG 离线评测
+### 环境要求
 
-评测以父级 context ID 为黄金标签，复用线上 Query Rewrite、Hybrid/RRF、Rerank 与生成链路。先创建版本化黄金集，再触发运行：
+- JDK 17
+- Maven 3.8+
+- Docker Desktop 或 Docker Engine（仅完整基础设施、容器部署和 Docker 沙箱需要）
 
-先调用 `GET /api/rag/evaluations/contexts` 获取可标注的父级 `contextId`；不要使用上传接口返回的临时 child chunk 序号。
+### 1. 最小模式启动
 
-```http
-POST /api/rag/evaluations/datasets
-Content-Type: application/json
-
-{
-  "name": "office-policy",
-  "version": "v1",
-  "description": "办公制度基准集",
-  "cases": [{
-    "caseId": "expense-001",
-    "question": "上海出差住宿报销上限是多少？",
-    "referenceAnswer": "上海属于一类地区，住宿费上限为每人每天 600 元。",
-    "relevantContextIds": [101, 102],
-    "category": "差旅",
-    "difficulty": "normal"
-  }]
-}
-```
-
-```http
-POST /api/rag/evaluations/runs
-Content-Type: application/json
-
-{
-  "datasetName": "office-policy",
-  "datasetVersion": "v1",
-  "topKs": [1, 3, 5, 10],
-  "generationEvaluation": true
-}
-```
-
-运行报告包含 `retrievalMetrics`、`rerankMetrics`、`contextMetrics`、`generationMetrics` 和逐题 `caseResults`。可通过 `GET /api/rag/evaluations/runs/{runId}` 查询完整报告，或通过 `GET /api/rag/evaluations/runs?datasetName=office-policy&datasetVersion=v1` 查看历史摘要。未配置真实 LLM 时，Faithfulness 与 Answer Relevance 会跳过；PostgreSQL 不可用时，当前请求仍会返回报告，但不会保存历史。
-
-### 本地运行
+不配置 API Key，也不启动外部基础设施，即可体验页面、接口、Mock 对话和内存能力。
 
 ```bash
-# 1. 安装依赖
-go mod tidy
-
-# 2. 启动基础设施（需要 Docker Desktop）
-docker compose up -d
-
-# 3. 启动应用
-go run .
-
-# 4. 访问 http://localhost:8090
+mvn spring-boot:run
 ```
 
-### Docker 部署
+打开 <http://localhost:8090>，或检查运行状态：
 
 ```bash
-# 编译 + 启动全部服务
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o final-agent .
+curl http://localhost:8090/api/status
+```
+
+### 2. 接入真实模型
+
+项目默认使用火山引擎 Ark 地址。推荐通过环境变量传入密钥，不要把密钥提交到仓库。
+
+PowerShell：
+
+```powershell
+$env:APP_LLM_API_KEY = "your-ark-api-key"
+$env:APP_EMBEDDING_API_KEY = "your-ark-api-key"
+$env:TAVILY_API_KEY = "your-tavily-api-key" # 可选
+mvn spring-boot:run
+```
+
+Bash：
+
+```bash
+export APP_LLM_API_KEY="your-ark-api-key"
+export APP_EMBEDDING_API_KEY="your-ark-api-key"
+export TAVILY_API_KEY="your-tavily-api-key" # 可选
+mvn spring-boot:run
+```
+
+如需使用其他兼容服务，可同时覆盖：
+
+```text
+APP_LLM_API_URL
+APP_LLM_MODEL
+APP_EMBEDDING_API_URL
+APP_EMBEDDING_MODEL
+```
+
+只配置 LLM Key 时可以真实对话；未配置 Embedding Key 时，向量相关能力会回退到非向量或内存路径。
+
+### 3. 启动完整基础设施
+
+先启动 PostgreSQL、Milvus、Elasticsearch、Kafka 和 Neo4j，再在宿主机运行应用：
+
+```bash
+docker compose up -d milvus postgres elasticsearch kafka neo4j
+mvn spring-boot:run
+```
+
+`milvus` 会自动带起其依赖的 etcd 和 MinIO。首次拉取镜像和等待健康检查需要一些时间。
+
+也可以构建并启动包含应用在内的全部服务：
+
+```bash
 docker compose up -d --build
 ```
 
-### 配置
+容器模式需要在 `docker-compose.yml` 的 `agi-agent.environment` 中额外传入 `APP_LLM_API_KEY`、`APP_EMBEDDING_API_KEY` 和可选的 `TAVILY_API_KEY`，否则应用会使用 Mock 模式。
 
-编辑 `config/config.yaml`，填入 API Key：
+## 配置说明
 
-- `llm.api_key` — 火山引擎 Ark 对话模型 API Key
-- `embedding.api_key` — 火山引擎 Embedding 模型 API Key
-- `search.api_key` — Tavily 搜索 API Key（可选）
+主配置文件位于 `src/main/resources/application.yml`，Spring Boot 配置均可用同名环境变量覆盖。例如 `app.rag.top-k` 对应 `APP_RAG_TOP_K`。
 
-> 所有基础设施（Milvus/PG/ES/Kafka/Neo4j）均为可选，连接失败自动降级为内存模式，不影响启动。
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `server.port` | `8090` | HTTP 服务端口 |
+| `app.llm.api-key` | 空 | 为空时使用 Mock LLM |
+| `app.embedding.api-key` | 空 | 为空时不调用真实 Embedding API |
+| `app.rag.top-k` | `3` | 最终检索结果数量 |
+| `app.rag.enable-hybrid-search` | `true` | 是否启用混合检索 |
+| `app.rag.rewrite.enabled` | `true` | 是否启用查询改写 |
+| `app.rag.rerank.enabled` | `false` | 是否启用 LLM 精排 |
+| `app.memory.short-term-max-turns` | `10` | 短期记忆最大轮数 |
+| `app.harness.max-iterations` | `5` | ReAct 最大迭代数 |
+| `app.sandbox.backend` | `docker` | `docker`、`local` 或 `mock` |
+| `app.neo4j.enabled` | `true` | 是否尝试启用知识图谱 |
+
+外部服务的默认开发端口：
+
+| 服务 | 地址/端口 |
+| --- | --- |
+| Web 应用 | `http://localhost:8090` |
+| PostgreSQL | `localhost:5432` |
+| Milvus | `localhost:19530` |
+| Elasticsearch | `http://localhost:9200` |
+| Kafka | `localhost:29092` |
+| Neo4j Browser / Bolt | `http://localhost:7474` / `bolt://localhost:7687` |
+| MinIO Console | `http://localhost:9001` |
+
+## API 示例
+
+### 同步对话
+
+```bash
+curl -X POST http://localhost:8090/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "总结一下我的知识库里关于报销制度的内容",
+    "use_rag": true,
+    "selected_tools": [],
+    "user_id": "demo-user",
+    "session_id": "demo-session"
+  }'
+```
+
+请求字段：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `message` | 是 | 用户输入 |
+| `use_rag` | 否 | 是否启用知识库检索，默认 `false` |
+| `selected_tools` | 否 | 指定允许使用的工具名称；多工具可进入 ReAct 流程 |
+| `explicit` | 否 | 是否按显式工具选择处理 |
+| `user_id` | 否 | 用户记忆空间标识 |
+| `session_id` | 否 | 会话短期记忆标识 |
+
+### 流式对话与取消
+
+流式接口为 `POST /api/chat/stream`，请求体与同步接口一致，响应类型为 `text/event-stream`。
+
+```bash
+curl -N -X POST http://localhost:8090/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message":"查询资料并给出执行计划","selected_tools":["search_web"]}'
+```
+
+取消当前执行任务：
+
+```bash
+curl -X POST http://localhost:8090/api/chat/cancel
+```
+
+### 导入知识库
+
+直接导入文本：
+
+```bash
+curl -X POST http://localhost:8090/api/upload \
+  -H "Content-Type: application/json" \
+  -d '{"content":"这里是要进入知识库的文档内容。"}'
+```
+
+上传 PDF、TXT 或 Markdown 文件：
+
+```bash
+curl -X POST http://localhost:8090/api/upload/file \
+  -F "file=@./example.pdf"
+```
+
+扫描版 PDF 当前不包含 OCR 引擎；接口会返回 `needs_ocr: true`，需要先在外部完成 OCR。
+
+### 常用接口
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/chat` | 同步对话 |
+| `POST` | `/api/chat/stream` | SSE 流式对话 |
+| `POST` | `/api/chat/cancel` | 取消当前任务 |
+| `POST` | `/api/upload` | 导入纯文本到 RAG |
+| `POST` | `/api/upload/file` | 上传 PDF/TXT/Markdown |
+| `GET` | `/api/documents` | 查询文档列表 |
+| `GET` | `/api/documents/{id}` | 查询文档与最新版本 |
+| `POST` | `/api/documents` | 创建文档，可选择写入 RAG |
+| `POST` | `/api/docs/delete` | 按 `doc_hash` 删除 RAG 文档块 |
+| `GET` | `/api/memory` | 查询用户/会话记忆状态 |
+| `GET` | `/api/tools` | 查询可用工具 |
+| `POST` | `/api/tools/mcp` | 动态注册 HTTP MCP 工具 |
+| `GET` | `/api/snapshots` | 查询执行快照 |
+| `GET` | `/api/status` | 查询应用与基础设施状态 |
+
+## RAG 离线评测
+
+评测数据使用父级 Context ID 作为黄金标签。先读取可标注上下文：
+
+```bash
+curl http://localhost:8090/api/rag/evaluations/contexts
+```
+
+保存一个版本化数据集：
+
+```bash
+curl -X POST http://localhost:8090/api/rag/evaluations/datasets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "office-policy",
+    "version": "v1",
+    "description": "办公制度基准集",
+    "cases": [{
+      "caseId": "expense-001",
+      "question": "上海出差住宿报销上限是多少？",
+      "referenceAnswer": "上海属于一类地区，住宿费上限为每人每天 600 元。",
+      "relevantContextIds": [101, 102],
+      "category": "差旅",
+      "difficulty": "normal"
+    }]
+  }'
+```
+
+运行评测：
+
+```bash
+curl -X POST http://localhost:8090/api/rag/evaluations/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "datasetName": "office-policy",
+    "datasetVersion": "v1",
+    "topKs": [1, 3, 5, 10],
+    "generationEvaluation": true
+  }'
+```
+
+可通过 `GET /api/rag/evaluations/runs/{runId}` 获取报告，或通过 `GET /api/rag/evaluations/runs` 查询历史。没有真实 LLM 时，依赖模型裁判的生成指标会跳过；没有 PostgreSQL 时，数据仅保留在当前进程内存中。
+
+## 项目结构
+
+```text
+src/main/java/com/jianjin/assistant/
+├── application/chat/       # 对话编排、路由、ReAct、上下文与子智能体
+├── config/                 # Spring 配置映射
+├── domain/                 # RAG、文档、沙箱、任务图、Prompt Context 领域模型
+├── infrastructure/         # 数据库、检索、事件总线、MCP 与沙箱实现
+├── interfaces/             # HTTP Controller 与 RAG 评测接口
+├── service/                # LLM、RAG、记忆、文档、图谱、工具等服务
+└── model/                  # API 与执行过程使用的通用模型
+
+src/main/resources/
+├── application.yml         # 默认配置
+└── static/index.html       # 单页 Web 客户端
+```
+
+## 构建与测试
+
+运行全部测试：
+
+```bash
+mvn test
+```
+
+构建可执行 JAR：
+
+```bash
+mvn clean package
+java -jar target/agi-assistant-1.0.0.jar
+```
+
+构建 Docker 镜像：
+
+```bash
+docker build -t dreamloop-office-agent .
+```
+
+## 内置工具说明
+
+| 工具 | 行为 |
+| --- | --- |
+| `get_time` | 按指定 IANA 时区返回当前时间 |
+| `get_weather` | 返回内置城市天气样例，当前不是实时天气服务 |
+| `search_web` | 配置 Tavily 时执行真实搜索，否则回退到 LLM/Mock |
+| `rag_search` | 查询已导入的个人知识库 |
+| `exec_command` | 在配置的 Docker、Local 或 Mock 沙箱中执行经过校验的单条命令 |
+
+`exec_command` 默认使用 Docker 后端，并限制超时、输出大小、内存、CPU、PID、网络与只读根文件系统。使用 `local` 后端会直接在应用所在机器执行通过校验的命令，只应在可信开发环境中开启。
+
+## 生产使用前须知
+
+- 默认数据库密码、Neo4j 密码和 Elasticsearch 配置仅用于本地开发，部署前必须修改。
+- Controller 当前允许跨域来源 `*`，且 API 没有内置认证与租户鉴权，不应直接暴露到公网。
+- Docker Compose 会启动多个资源密集型组件；资源有限时可只启动实际需要的服务。
+- 动态 MCP 工具会向配置的 HTTP Endpoint 发起请求，应限制可注册地址并增加认证、审计和网络策略。
+- Local 沙箱的隔离能力低于 Docker 沙箱；生产环境应使用真正隔离的执行节点，并按需收紧命令白名单。
