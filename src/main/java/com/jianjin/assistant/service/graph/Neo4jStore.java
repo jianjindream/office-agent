@@ -70,7 +70,8 @@ public class Neo4jStore {
         String[] queries = {
                 "CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE",
                 "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.type)",
-                "CREATE INDEX memory_node_id IF NOT EXISTS FOR (m:Memory) ON (m.mem_id)"
+                "MATCH (m:Memory) WHERE m.user_id IS NULL SET m.user_id = 'default'",
+                "CREATE INDEX memory_node_scope IF NOT EXISTS FOR (m:Memory) ON (m.user_id, m.mem_id)"
         };
         try (Session s = session()) {
             for (String q : queries) {

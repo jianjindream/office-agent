@@ -687,6 +687,11 @@ let selectedTools = [];   // names of checked tools
 let availableTools = [];  // [{name, desc}]
 let sessions = JSON.parse(localStorage.getItem('ai_sessions') || '[]');
 let currentId = null;
+let anonymousUserId = localStorage.getItem('ai_user_id');
+if (!anonymousUserId) {
+  anonymousUserId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'anon-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  localStorage.setItem('ai_user_id', anonymousUserId);
+}
 let uploadedDocs = JSON.parse(localStorage.getItem('ai_docs') || '[]');
 let isLoading = false;
 
@@ -1050,7 +1055,9 @@ async function send() {
       message: msg,
       use_rag: ragOn,
       selected_tools: selectedTools,
-      explicit: true
+      explicit: true,
+      user_id: anonymousUserId,
+      session_id: currentId
     };
     const data = await fetch('/api/chat', {
       method: 'POST',

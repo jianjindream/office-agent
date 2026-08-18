@@ -207,14 +207,35 @@ public class AppConfig {
     }
 
     public static class MemoryConfig {
-        private int shortTermMaxTurns = 5;
+        private int shortTermMaxTurns = 10;
         private int longTermTopK = 3;
+        private int minRecentTurns = 4;
+        private int contextWindowTokens = 32768;
+        private int reservedOutputTokens = 4096;
+        private int historyMaxTokens = 8000;
+        private int summaryMaxTokens = 1200;
+        private int summarySoftTurns = 8;
+        private int summarySoftTokens = 6000;
         private ConsolidationConfig consolidation = new ConsolidationConfig();
 
         public int getShortTermMaxTurns() { return shortTermMaxTurns; }
         public void setShortTermMaxTurns(int shortTermMaxTurns) { this.shortTermMaxTurns = shortTermMaxTurns; }
         public int getLongTermTopK() { return longTermTopK; }
         public void setLongTermTopK(int longTermTopK) { this.longTermTopK = longTermTopK; }
+        public int getMinRecentTurns() { return minRecentTurns; }
+        public void setMinRecentTurns(int minRecentTurns) { this.minRecentTurns = minRecentTurns; }
+        public int getContextWindowTokens() { return contextWindowTokens; }
+        public void setContextWindowTokens(int contextWindowTokens) { this.contextWindowTokens = contextWindowTokens; }
+        public int getReservedOutputTokens() { return reservedOutputTokens; }
+        public void setReservedOutputTokens(int reservedOutputTokens) { this.reservedOutputTokens = reservedOutputTokens; }
+        public int getHistoryMaxTokens() { return historyMaxTokens; }
+        public void setHistoryMaxTokens(int historyMaxTokens) { this.historyMaxTokens = historyMaxTokens; }
+        public int getSummaryMaxTokens() { return summaryMaxTokens; }
+        public void setSummaryMaxTokens(int summaryMaxTokens) { this.summaryMaxTokens = summaryMaxTokens; }
+        public int getSummarySoftTurns() { return summarySoftTurns; }
+        public void setSummarySoftTurns(int summarySoftTurns) { this.summarySoftTurns = summarySoftTurns; }
+        public int getSummarySoftTokens() { return summarySoftTokens; }
+        public void setSummarySoftTokens(int summarySoftTokens) { this.summarySoftTokens = summarySoftTokens; }
         public ConsolidationConfig getConsolidation() { return consolidation; }
         public void setConsolidation(ConsolidationConfig consolidation) { this.consolidation = consolidation; }
     }

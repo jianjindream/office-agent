@@ -197,11 +197,11 @@ public class KGStore {
 
     // ─────────────────────────── 记忆图操作 ────────────────────────────────
 
-    public void upsertMemoryNode(int memId, String content, double importance) {
+    public void upsertMemoryNode(String userId, int memId, String content, double importance) {
         if (!available()) return;
         try (Session s = neo4j.session()) {
-            s.run("MERGE (m:Memory {mem_id: $id}) SET m.content = $content, m.importance = $importance",
-                    Values.parameters("id", (long) memId, "content", content, "importance", importance));
+            s.run("MERGE (m:Memory {user_id: $userId, mem_id: $id}) SET m.content = $content, m.importance = $importance",
+                    Values.parameters("userId", userId, "id", (long) memId, "content", content, "importance", importance));
         } catch (Exception e) {
             log.warn("Neo4j UpsertMemoryNode 失败 (id={}): {}", memId, e.getMessage());
         }
@@ -210,14 +210,14 @@ public class KGStore {
     /**
      * edgeType: FOLLOWS | SIMILAR_TO | CAUSES | BELONGS_TO
      */
-    public void addMemoryEdge(int fromId, int toId, String edgeType, double weight) {
+    public void addMemoryEdge(String userId, int fromId, int toId, String edgeType, double weight) {
         if (!available()) return;
         if (!isValidMemoryEdge(edgeType)) return;
-        String query = "MATCH (a:Memory {mem_id: $from}), (b:Memory {mem_id: $to}) " +
+        String query = "MATCH (a:Memory {user_id: $userId, mem_id: $from}), (b:Memory {user_id: $userId, mem_id: $to}) " +
                 "MERGE (a)-[r:" + edgeType + "]->(b) SET r.weight = $weight";
         try (Session s = neo4j.session()) {
             s.run(query, Values.parameters(
-                    "from", (long) fromId,
+                    "userId", userId, "from", (long) fromId,
                     "to", (long) toId,
                     "weight", weight
             ));
@@ -226,17 +226,17 @@ public class KGStore {
         }
     }
 
-    public List<Integer> expandMemoryNeighbors(List<Integer> seedIds, int hops) {
+    public List<Integer> expandMemoryNeighbors(String userId, List<Integer> seedIds, int hops) {
         if (!available() || seedIds == null || seedIds.isEmpty()) return List.of();
         List<Long> longSeeds = new ArrayList<>();
         for (int id : seedIds) longSeeds.add((long) id);
         int h = hops > 0 ? hops : 1;
-        String query = "MATCH (m:Memory) WHERE m.mem_id IN $ids " +
+        String query = "MATCH (m:Memory {user_id: $userId}) WHERE m.mem_id IN $ids " +
                 "MATCH (m)-[:FOLLOWS|SIMILAR_TO|CAUSES|BELONGS_TO*1.." + h + "]-(n:Memory) " +
-                "WHERE NOT n.mem_id IN $ids RETURN DISTINCT n.mem_id AS id";
+                "WHERE n.user_id = $userId AND NOT n.mem_id IN $ids RETURN DISTINCT n.mem_id AS id";
         List<Integer> result = new ArrayList<>();
         try (Session s = neo4j.session()) {
-            Result rs = s.run(query, Values.parameters("ids", longSeeds));
+            Result rs = s.run(query, Values.parameters("userId", userId, "ids", longSeeds));
             while (rs.hasNext()) {
                 result.add((int) rs.next().get("id").asLong(-1));
             }
@@ -246,11 +246,11 @@ public class KGStore {
         return result;
     }
 
-    public void deleteMemoryNode(int memId) {
+    public void deleteMemoryNode(String userId, int memId) {
         if (!available()) return;
         try (Session s = neo4j.session()) {
-            s.run("MATCH (m:Memory {mem_id: $id}) DETACH DELETE m",
-                    Values.parameters("id", (long) memId));
+            s.run("MATCH (m:Memory {user_id: $userId, mem_id: $id}) DETACH DELETE m",
+                    Values.parameters("userId", userId, "id", (long) memId));
         } catch (Exception e) {
             log.warn("Neo4j DeleteMemoryNode 失败 (id={}): {}", memId, e.getMessage());
         }
@@ -259,17 +259,17 @@ public class KGStore {
     /**
      * 在待删除列表中找出图中入度较高（受保护）的节点
      */
-    public List<Integer> getHighCentralityMemoryIds(List<Integer> candidates, int threshold) {
+    public List<Integer> getHighCentralityMemoryIds(String userId, List<Integer> candidates, int threshold) {
         if (!available() || candidates == null || candidates.isEmpty()) return List.of();
         List<Long> longIds = new ArrayList<>();
         for (int id : candidates) longIds.add((long) id);
-        String query = "MATCH (m:Memory) WHERE m.mem_id IN $ids " +
+        String query = "MATCH (m:Memory {user_id: $userId}) WHERE m.mem_id IN $ids " +
                 "WITH m, size([(m)<-[]-() | 1]) AS indegree " +
                 "WHERE indegree >= $threshold RETURN m.mem_id AS id";
         List<Integer> result = new ArrayList<>();
         try (Session s = neo4j.session()) {
             Result rs = s.run(query, Values.parameters(
-                    "ids", longIds,
+                    "userId", userId, "ids", longIds,
                     "threshold", (long) threshold
             ));
             while (rs.hasNext()) {

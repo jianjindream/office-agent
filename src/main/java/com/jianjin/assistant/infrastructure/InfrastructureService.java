@@ -13,6 +13,7 @@ import com.jianjin.assistant.infrastructure.persistence.LongTermRepository;
 import com.jianjin.assistant.infrastructure.persistence.PreferenceRepository;
 import com.jianjin.assistant.infrastructure.persistence.RagChunkRepository;
 import com.jianjin.assistant.infrastructure.persistence.SnapshotRepository;
+import com.jianjin.assistant.infrastructure.persistence.SessionSummaryRepository;
 import com.jianjin.assistant.infrastructure.platform.ESConnector;
 import com.jianjin.assistant.infrastructure.platform.KafkaConnector;
 import com.jianjin.assistant.infrastructure.platform.MilvusConnector;
@@ -35,6 +36,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import com.jianjin.assistant.service.memory.SessionSummary;
 
 /**
  * 基础设施门面（兼容层）。
@@ -67,6 +69,7 @@ public class InfrastructureService {
     private final LongTermRepository longTermRepo;
     private final ChatHistoryRepository chatHistoryRepo;
     private final SnapshotRepository snapshotRepo;
+    private final SessionSummaryRepository sessionSummaryRepo;
     private final RagChunkRepository ragChunkRepo;
 
     public InfrastructureService(PostgresConnector pg,
@@ -76,9 +79,10 @@ public class InfrastructureService {
                                  Neo4jConnector neo4jConn,
                                  PreferenceRepository preferenceRepo,
                                  LongTermRepository longTermRepo,
-                                 ChatHistoryRepository chatHistoryRepo,
-                                 SnapshotRepository snapshotRepo,
-                                 RagChunkRepository ragChunkRepo) {
+                                  ChatHistoryRepository chatHistoryRepo,
+                                  SnapshotRepository snapshotRepo,
+                                  SessionSummaryRepository sessionSummaryRepo,
+                                  RagChunkRepository ragChunkRepo) {
         this.pg = pg;
         this.milvusConn = milvusConn;
         this.esConn = esConn;
@@ -88,6 +92,7 @@ public class InfrastructureService {
         this.longTermRepo = longTermRepo;
         this.chatHistoryRepo = chatHistoryRepo;
         this.snapshotRepo = snapshotRepo;
+        this.sessionSummaryRepo = sessionSummaryRepo;
         this.ragChunkRepo = ragChunkRepo;
     }
 
@@ -120,13 +125,13 @@ public class InfrastructureService {
 
     // ================= Long-term Memory =================
 
-    public int saveLongTermItem(String content, double importance, String embeddingJson) {
-        return longTermRepo.save(content, importance, embeddingJson);
+    public int saveLongTermItem(String userId, String content, double importance, String embeddingJson) {
+        return longTermRepo.save(userId, content, importance, embeddingJson);
     }
 
-    public int saveLongTermItemClassified(String content, double importance, String embeddingJson,
-                                          String category, String tagsJson, String slotHint) {
-        return longTermRepo.saveClassified(content, importance, embeddingJson, category, tagsJson, slotHint);
+    public int saveLongTermItemClassified(String userId, String content, double importance, String embeddingJson,
+                                           String category, String tagsJson, String slotHint) {
+        return longTermRepo.saveClassified(userId, content, importance, embeddingJson, category, tagsJson, slotHint);
     }
 
     public static class LongTermRow {
@@ -135,9 +140,9 @@ public class InfrastructureService {
         public String category; public List<String> tags; public String slotHint;
     }
 
-    public List<LongTermRow> loadLongTermItems() {
+    public List<LongTermRow> loadLongTermItems(String userId) {
         List<LongTermRow> out = new ArrayList<>();
-        for (LongTermRepository.Row r : longTermRepo.loadAll()) {
+        for (LongTermRepository.Row r : longTermRepo.loadAll(userId)) {
             LongTermRow row = new LongTermRow();
             row.id = r.id; row.content = r.content; row.importance = r.importance;
             row.embedding = r.embedding; row.createdAt = r.createdAt; row.lastAccessed = r.lastAccessed;
@@ -147,12 +152,12 @@ public class InfrastructureService {
         return out;
     }
 
-    public void updateLongTermItem(int id, String content, double importance, String embeddingJson) {
-        longTermRepo.update(id, content, importance, embeddingJson);
+    public void updateLongTermItem(String userId, int id, String content, double importance, String embeddingJson) {
+        longTermRepo.update(userId, id, content, importance, embeddingJson);
     }
 
-    public void deleteLongTermItems(List<Integer> ids) {
-        longTermRepo.deleteAll(ids);
+    public void deleteLongTermItems(String userId, List<Integer> ids) {
+        longTermRepo.deleteAll(userId, ids);
     }
 
     // ================= RAG Chunks =================
@@ -226,22 +231,34 @@ public class InfrastructureService {
 
     // ================= Chat History =================
 
-    public void saveChatHistory(String role, String content) {
-        chatHistoryRepo.save(role, content);
+    public long saveChatHistory(String userId, String sessionId, String role, String content) {
+        return chatHistoryRepo.save(userId, sessionId, role, content);
     }
 
     public static class ChatHistoryRow {
-        public String role; public String content; public String createdAt;
+        public long id; public String role; public String content; public String createdAt;
     }
 
-    public List<ChatHistoryRow> loadChatHistory(int limit) {
+    public List<ChatHistoryRow> loadChatHistory(String userId, String sessionId, long afterId, int limit) {
         List<ChatHistoryRow> out = new ArrayList<>();
-        for (ChatHistoryRepository.Row r : chatHistoryRepo.load(limit)) {
+        for (ChatHistoryRepository.Row r : chatHistoryRepo.load(userId, sessionId, afterId, limit)) {
             ChatHistoryRow row = new ChatHistoryRow();
-            row.role = r.role; row.content = r.content; row.createdAt = r.createdAt;
+            row.id = r.id; row.role = r.role; row.content = r.content; row.createdAt = r.createdAt;
             out.add(row);
         }
         return out;
+    }
+
+    public void deleteChatHistoryThrough(String userId, String sessionId, long throughId) {
+        chatHistoryRepo.deleteThrough(userId, sessionId, throughId);
+    }
+
+    public SessionSummary loadSessionSummary(String userId, String sessionId) {
+        return sessionSummaryRepo.load(userId, sessionId);
+    }
+
+    public void saveSessionSummary(String userId, String sessionId, SessionSummary summary) {
+        sessionSummaryRepo.save(userId, sessionId, summary);
     }
 
     // ================= Snapshot =================

@@ -51,7 +51,17 @@ public class PostgresConnector {
                     task_id TEXT PRIMARY KEY, state JSONB NOT NULL, created_at TIMESTAMP DEFAULT NOW())""",
                 """
                 CREATE TABLE IF NOT EXISTS chat_history (
-                    id SERIAL PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW())""",
+                    id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL DEFAULT 'default',
+                    session_id TEXT NOT NULL DEFAULT 'default', role TEXT NOT NULL, content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW())""",
+                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'default'",
+                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'default'",
+                "CREATE INDEX IF NOT EXISTS idx_chat_history_scope ON chat_history(user_id, session_id, id)",
+                """
+                CREATE TABLE IF NOT EXISTS session_summaries (
+                    user_id TEXT NOT NULL, session_id TEXT NOT NULL, summary JSONB NOT NULL,
+                    summarized_through_id BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (user_id, session_id))""",
                 """
                 CREATE TABLE IF NOT EXISTS long_term_memory (
                     id SERIAL PRIMARY KEY, content TEXT NOT NULL, importance FLOAT NOT NULL DEFAULT 0.5,
@@ -60,6 +70,8 @@ public class PostgresConnector {
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'",
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS tags JSONB",
                 "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS slot_hint TEXT",
+                "ALTER TABLE long_term_memory ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'default'",
+                "CREATE INDEX IF NOT EXISTS idx_long_term_memory_user ON long_term_memory(user_id, id)",
                 """
                 CREATE TABLE IF NOT EXISTS rag_parent_chunks (
                     id BIGSERIAL PRIMARY KEY, doc_hash TEXT NOT NULL, parent_idx INT NOT NULL,
