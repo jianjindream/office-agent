@@ -1,6 +1,6 @@
 # Office Agent
 
-一个基于 Java 17 与 Spring Boot 3 的办公智能体项目。它把多轮对话、RAG 知识库、四层记忆、工具调用、ReAct 多步执行、知识图谱和离线评测整合到同一个 Web 应用中，并提供开箱即用的单页界面与 HTTP API。
+一个基于 Java 17 与 Spring Boot 3 的办公智能体项目。它把多轮对话、RAG 知识库、四层记忆、工具调用、ReAct 多步执行、知识图谱和评测整合到同一个 Web 应用中，并提供开箱即用的单页界面与 HTTP API。
 
 ## 主要能力
 
@@ -11,7 +11,7 @@
 - **分层记忆**：按 `user_id` 与 `session_id` 隔离短期记忆、长期记忆、用户偏好和会话摘要。
 - **工具系统**：内置时间、模拟天气、Web 搜索、知识库检索和沙箱命令工具，并可在运行时注册 HTTP MCP 工具。
 - **可靠执行**：包含执行计划、步骤重试、超时、快照和中断机制。
-- **RAG 离线评测**：支持版本化黄金数据集，以及 Recall、MRR、NDCG、上下文质量和生成质量评测。
+- **RAG 评测**：支持版本化黄金数据集，以及 Recall、MRR、NDCG、上下文质量和生成质量评测。
 - **可选基础设施**：PostgreSQL、Milvus、Elasticsearch、Neo4j 和 Kafka 不可用时，应用会尽量降级运行。
 
 ## 系统架构
@@ -237,7 +237,7 @@ curl -X POST http://localhost:8090/api/upload/file \
 | `GET` | `/api/snapshots` | 查询执行快照 |
 | `GET` | `/api/status` | 查询应用与基础设施状态 |
 
-## RAG 离线评测
+## RAG 评测
 
 评测数据使用父级 Context ID 作为黄金标签。先读取可标注上下文：
 
