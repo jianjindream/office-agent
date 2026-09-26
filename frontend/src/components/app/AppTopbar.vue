@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Bell,
@@ -10,12 +10,31 @@ import {
   Sun,
 } from 'lucide-vue-next'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { agentApi } from '@/api/agent'
 
 const route = useRoute()
 const workspace = useWorkspaceStore()
 const title = computed(() => String(route.meta.title ?? 'DreamLoop'))
 const eyebrow = computed(() => String(route.meta.eyebrow ?? 'AI Workspace'))
 const supportsContext = computed(() => Boolean(route.meta.showContext))
+const serviceStatus = ref<'checking' | 'online' | 'offline'>('checking')
+let statusTimer: number | undefined
+
+const checkService = async () => {
+  try {
+    await agentApi.status()
+    serviceStatus.value = 'online'
+  } catch {
+    serviceStatus.value = 'offline'
+  }
+}
+
+onMounted(() => {
+  checkService()
+  statusTimer = window.setInterval(checkService, 30_000)
+})
+
+onBeforeUnmount(() => window.clearInterval(statusTimer))
 </script>
 
 <template>
@@ -32,7 +51,7 @@ const supportsContext = computed(() => Boolean(route.meta.showContext))
     </button>
 
     <div class="top-actions">
-      <span class="service-status"><i></i> 服务正常</span>
+      <span class="service-status" :class="serviceStatus"><i></i>{{ serviceStatus === 'online' ? '服务正常' : serviceStatus === 'offline' ? '服务离线' : '正在检查' }}</span>
       <button class="icon-button" type="button" aria-label="通知">
         <Bell :size="18" />
         <span class="notification-dot"></span>
@@ -163,6 +182,16 @@ const supportsContext = computed(() => Boolean(route.meta.showContext))
   border-radius: 50%;
   background: currentColor;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.service-status.offline {
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-elevated));
+  color: var(--danger);
+}
+
+.service-status.checking {
+  background: var(--bg-hover);
+  color: var(--text-faint);
 }
 
 .icon-button {

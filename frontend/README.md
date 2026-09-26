@@ -1,6 +1,6 @@
 # DreamLoop Web
 
-DreamLoop 的 Vue 3 前端工程。当前阶段完成了产品级视觉骨架、主导航、主题系统、响应式布局以及 API 基础层。
+DreamLoop 的 Vue 3 前端工程。当前已经完成产品级视觉骨架和核心聊天体验，包括 SSE 事件流、会话持久化、Markdown、代码高亮、工具执行过程与 RAG 引用。
 
 ## 本地开发
 
@@ -36,3 +36,13 @@ npm run build
 - `/documents`：AI 文档
 - `/tools`：工具中心
 - `/settings`：工作区设置
+
+## 聊天能力
+
+- 使用 `POST /api/chat/stream` 接收语义事件流
+- 支持停止生成、失败重试和服务状态探测
+- 会话与消息保存到浏览器本地存储
+- Markdown 内容经过 DOMPurify 清洗后渲染
+- 常用语言使用 Shiki 高亮，并支持复制代码
+- 工具调用、执行步骤和知识库引用可视化
+- PDF、Markdown、TXT 通过 multipart 接口上传

@@ -13,9 +13,14 @@ import {
   Sparkles,
 } from 'lucide-vue-next'
 import { RouterLink } from 'vue-router'
+import { useRouter } from 'vue-router'
+import { computed } from 'vue'
+import { useChatStore } from '@/stores/chat'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const workspace = useWorkspaceStore()
+const chatStore = useChatStore()
+const router = useRouter()
 
 const navigation = [
   { label: 'AI 对话', to: '/chat', icon: MessageSquareText },
@@ -24,11 +29,24 @@ const navigation = [
   { label: '工具中心', to: '/tools', icon: Blocks },
 ]
 
-const recentChats = [
-  { title: '季度经营分析总结', time: '刚刚', active: true },
-  { title: '产品需求文档优化', time: '昨天' },
-  { title: '用户访谈纪要整理', time: '周一' },
-]
+const recentChats = computed(() => chatStore.sortedSessions.slice(0, 5))
+
+const newChat = () => {
+  chatStore.createSession()
+  router.push('/chat')
+}
+
+const openChat = (sessionId: string) => {
+  chatStore.selectSession(sessionId)
+  router.push('/chat')
+}
+
+const formatTime = (timestamp: number) => {
+  const now = new Date()
+  const value = new Date(timestamp)
+  if (value.toDateString() === now.toDateString()) return value.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  return value.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
 </script>
 
 <template>
@@ -61,7 +79,7 @@ const recentChats = [
       <ChevronDown class="workspace-chevron" :size="15" />
     </button>
 
-    <button class="new-chat" type="button">
+    <button class="new-chat" type="button" @click="newChat">
       <Plus :size="17" />
       <span>新建对话</span>
       <kbd>⌘ K</kbd>
@@ -90,13 +108,14 @@ const recentChats = [
         v-for="chat in recentChats"
         :key="chat.title"
         class="recent-item"
-        :class="{ active: chat.active }"
+        :class="{ active: chat.id === chatStore.currentSessionId }"
         type="button"
+        @click="openChat(chat.id)"
       >
         <span class="recent-dot"></span>
         <span class="recent-copy">
           <strong>{{ chat.title }}</strong>
-          <small>{{ chat.time }}</small>
+          <small>{{ formatTime(chat.updatedAt) }}</small>
         </span>
       </button>
     </div>
